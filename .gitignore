@@ -1,0 +1,16 @@
+.env
+
+# Local JSON memory backend (real athlete data when ATHLETEOS_STORAGE_BACKEND=
+# json is used for local dev) - never belongs in the repo, same reasoning as
+# .env: this is real user data, not application code. Production uses the
+# Postgres backend instead (see postgres_memory_backend.py), so nothing here
+# is needed for deployment either.
+memory/
+
+# Python build/runtime artifacts
+__pycache__/
+*.pyc
+
+# Local editor/tooling state
+.claude/
+

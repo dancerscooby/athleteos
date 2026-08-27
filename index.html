@@ -1,0 +1,1241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AthleteOS - Meal Plan</title>
+  <style>
+    /* ==================================================================
+       AthleteOS design system - vanilla CSS, no framework/build step.
+       Token groups: colour, spacing, radius, elevation, type. Everything
+       below reuses these tokens rather than hard-coded values, so the
+       whole visual system stays adjustable from one place.
+       ================================================================== */
+    :root {
+      /* Colour */
+      --bg: #f4f6fa;              /* page background */
+      --surface: #ffffff;          /* card background (results, form) */
+      --surface-sunken: #eef2f9;   /* tinted zone - marks "input/config" areas */
+      --ink: #171f2e;              /* primary text */
+      --muted: #5b6472;            /* secondary text */
+      --line: #e2e6ec;             /* default border */
+      --line-soft: #edf0f5;        /* lighter divider */
+      --accent: #2f6fed;           /* primary brand/action colour */
+      --accent-ink: #ffffff;       /* text on top of --accent */
+      --accent-soft: #eaf1ff;      /* tinted accent background */
+      --accent-strong: #1d4ed8;    /* pressed/emphasis accent */
+      --cal: #f59e0b;
+      --pro: #16a34a;
+      --carb: #2f6fed;
+      --fat: #a855f7;
+      --ok: #16a34a;
+      --warn: #b8860b;
+      --err: #b00020;
+      --err-bg: #fdecef;
+      --err-border: #f5c2cd;
+
+      /* Spacing scale (used for margin/padding/gap everywhere below) */
+      --sp-1: 4px;
+      --sp-2: 8px;
+      --sp-3: 12px;
+      --sp-4: 16px;
+      --sp-5: 24px;
+      --sp-6: 32px;
+      --sp-7: 48px;
+
+      /* Radius scale */
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 18px;
+      --radius-pill: 999px;
+
+      /* Elevation - two tiers: quiet (form/config) vs. prominent (results) */
+      --shadow-1: 0 1px 3px rgba(16, 24, 40, 0.05);
+      --shadow-2: 0 6px 20px rgba(16, 24, 40, 0.09);
+
+      /* Type scale */
+      --fs-xs: 0.76rem;
+      --fs-sm: 0.86rem;
+      --fs-base: 1rem;
+      --fs-md: 1.1rem;
+      --fs-lg: 1.4rem;
+      --fs-xl: 2rem;
+      --fs-2xl: 2.4rem;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg); color: var(--ink);
+      margin: 0; padding: var(--sp-6) var(--sp-4); line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 880px; margin: 0 auto; }
+
+    /* --- Brand header --- */
+    .brand { display: flex; align-items: flex-start; gap: var(--sp-3); margin-bottom: var(--sp-6); }
+    .brand-mark {
+      flex: none; width: 44px; height: 44px; border-radius: var(--radius-md);
+      background: var(--accent); color: var(--accent-ink);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.3rem; font-weight: 800; letter-spacing: -0.02em;
+      box-shadow: var(--shadow-1);
+    }
+    header h1 { margin: 0; font-size: var(--fs-lg); font-weight: 800; letter-spacing: -0.01em; }
+    header .tagline { margin: 4px 0 0; color: var(--muted); font-size: var(--fs-sm); max-width: 46ch; }
+
+    /* --- Athlete switcher: "Planning for" identity strip --- */
+    .athlete-bar {
+      background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md);
+      padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-4);
+      box-shadow: var(--shadow-1);
+      display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap;
+    }
+    .athlete-avatar {
+      flex: none; width: 30px; height: 30px; border-radius: 50%;
+      background: var(--accent-soft); color: var(--accent-strong);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.95rem;
+    }
+    .athlete-bar-label { display: flex; flex-direction: column; gap: 1px; margin-right: 2px; }
+    .athlete-bar-label .eyebrow {
+      font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--muted); font-weight: 600;
+    }
+    .athlete-bar label.visually-hidden {
+      position: absolute; width: 1px; height: 1px; overflow: hidden;
+      clip: rect(0 0 0 0); white-space: nowrap;
+    }
+    .athlete-bar select { width: auto; flex: 1; min-width: 160px; }
+    .athlete-bar button { width: auto; padding: 9px 14px; }
+    .new-athlete-inline:not([hidden]) { display: flex; gap: 6px; align-items: center; flex: 1; min-width: 220px; }
+    .new-athlete-inline input { flex: 1; min-width: 140px; }
+    .new-athlete-inline button { width: auto; padding: 9px 14px; }
+
+    /* --- My Recipes --- */
+    .recipes-panel { margin-bottom: var(--sp-4); }
+    .recipes-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--sp-3); flex-wrap: wrap; }
+    .recipes-head h2 { margin: 0 0 2px; font-size: var(--fs-md); text-transform: none; letter-spacing: 0; color: var(--ink); font-weight: 700; }
+    .recipes-sub { margin: 0; color: var(--muted); font-size: var(--fs-sm); max-width: 48ch; }
+    #add-recipe-btn { width: auto; padding: 9px 14px; flex: none; }
+
+    .recipe-form-inline {
+      margin-top: var(--sp-4); background: var(--surface-sunken); border: 1px solid var(--line);
+      border-radius: var(--radius-md); padding: var(--sp-4);
+    }
+    .recipe-form-inline .grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+    .recipe-form-actions { display: flex; gap: var(--sp-2); margin-top: var(--sp-3); }
+    .recipe-form-actions button { width: auto; padding: 9px 16px; }
+    #recipe-cancel-btn { background: var(--surface); color: var(--ink); border: 1px solid var(--line); }
+    #recipe-cancel-btn:hover:not(:disabled) { background: var(--surface-sunken); }
+    .recipe-form-error {
+      margin-top: var(--sp-3); background: var(--err-bg); border: 1px solid var(--err-border);
+      color: var(--err); border-radius: var(--radius-sm); padding: 8px 12px; font-size: var(--fs-sm);
+    }
+
+    .recipe-list { margin-top: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-2); }
+    .recipe-empty { color: var(--muted); font-size: var(--fs-sm); margin: var(--sp-3) 0 0; }
+    .recipe-item {
+      border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface);
+      overflow: hidden;
+    }
+    .recipe-item summary {
+      cursor: pointer; padding: var(--sp-3) var(--sp-4); font-weight: 600; list-style: none;
+      display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+    }
+    .recipe-item summary::-webkit-details-marker { display: none; }
+    .recipe-item summary::before { content: "\25B8"; color: var(--accent); margin-right: 8px; font-size: 0.8em; }
+    .recipe-item[open] summary::before { content: "\25BE"; }
+    .recipe-item .recipe-meta { font-weight: 400; color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
+    .recipe-detail { padding: 0 var(--sp-4) var(--sp-4); border-top: 1px solid var(--line-soft); }
+    .recipe-detail p { margin: var(--sp-2) 0 0; font-size: var(--fs-sm); }
+    .recipe-detail p strong { color: var(--ink-soft, var(--muted)); font-weight: 600; }
+    .recipe-delete-btn {
+      width: auto; margin-top: var(--sp-3); padding: 6px 12px; font-size: var(--fs-xs);
+      background: var(--err-bg); color: var(--err); border: 1px solid var(--err-border);
+    }
+    .recipe-delete-btn:hover:not(:disabled) { filter: brightness(0.97); }
+
+    /* --- Form: sits on a "sunken" surface to read as the input/config
+       zone, visually distinct from the elevated results below --- */
+    form {
+      background: var(--surface-sunken); border: 1px solid var(--line);
+      border-radius: var(--radius-lg); padding: var(--sp-5);
+    }
+    .form-section { border: none; padding: 0; margin: 0 0 var(--sp-5); }
+    .form-section:last-of-type { margin-bottom: 0; }
+    .form-section legend {
+      font-weight: 700; padding: 0; margin-bottom: var(--sp-3);
+      font-size: var(--fs-sm); text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--accent-strong); display: flex; align-items: center; gap: 6px;
+    }
+    .form-section legend .step-dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--accent); display: inline-block;
+    }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--sp-3); }
+    .field { display: flex; flex-direction: column; }
+    label { font-size: var(--fs-sm); color: var(--muted); margin-bottom: 4px; font-weight: 500; }
+    input, select, textarea {
+      font: inherit; padding: 10px 11px; border: 1px solid var(--line);
+      border-radius: var(--radius-sm); background: var(--surface); color: var(--ink); width: 100%;
+    }
+    input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+    hr { border: none; border-top: 1px solid var(--line); margin: var(--sp-4) 0; }
+    button {
+      font: inherit; font-weight: 700; color: var(--accent-ink); background: var(--accent);
+      border: none; border-radius: var(--radius-sm); padding: 13px 18px; cursor: pointer; width: 100%;
+      font-size: var(--fs-base); letter-spacing: 0.01em;
+    }
+    button:hover:not(:disabled) { background: var(--accent-strong); }
+    button:active:not(:disabled) { filter: brightness(0.92); }
+    button:disabled { opacity: 0.65; cursor: not-allowed; }
+    .spinner {
+      display: inline-block; width: 15px; height: 15px; margin-right: 8px;
+      border: 2px solid rgba(255,255,255,0.5); border-top-color: #fff; border-radius: 50%;
+      vertical-align: -2px; animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Plan duration reads as a planning CHOICE, not an athlete attribute -
+       a small chip-style wrapper sets it apart within Training & Goal. */
+    .field-choice {
+      background: var(--accent-soft); border: 1px solid #d7e6ff; border-radius: var(--radius-sm);
+      padding: var(--sp-2) var(--sp-3);
+    }
+    .field-choice label { color: var(--accent-strong); font-weight: 600; }
+
+    .field-hint { color: var(--muted); font-size: var(--fs-xs); margin: 6px 0 0; line-height: 1.4; }
+    .field-wide { margin-top: var(--sp-1); }
+    .field-wide textarea { resize: vertical; min-height: 62px; font-family: inherit; }
+    .opt-note { font-weight: 400; font-style: italic; }
+
+    /* --- Messages --- */
+    .msg { margin: var(--sp-4) 0; padding: var(--sp-3) 14px; border-radius: var(--radius-sm); }
+    .msg.error { background: var(--err-bg); border: 1px solid var(--err-border); color: var(--err); }
+    .msg.error ul { margin: 6px 0 0; padding-left: 20px; }
+    .field-error { border-color: var(--err) !important; background: #fff6f7; }
+
+    /* --- Empty state: shown before the first plan exists --- */
+    .empty-state {
+      background: var(--surface); border: 1px dashed var(--line); border-radius: var(--radius-lg);
+      padding: var(--sp-6) var(--sp-5); text-align: center;
+    }
+    .empty-state h2 { margin: 0 0 6px; font-size: var(--fs-md); font-weight: 700; }
+    .empty-state > p { margin: 0 auto var(--sp-5); color: var(--muted); font-size: var(--fs-sm); max-width: 44ch; }
+    .empty-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: var(--sp-3);
+      text-align: left;
+    }
+    .empty-item {
+      background: var(--surface-sunken); border: 1px solid var(--line-soft); border-radius: var(--radius-md);
+      padding: var(--sp-3); display: flex; gap: 10px; align-items: flex-start;
+    }
+    .empty-item .glyph { font-size: 1.2rem; line-height: 1; flex: none; }
+    .empty-item strong { display: block; font-size: var(--fs-sm); margin-bottom: 2px; }
+    .empty-item span { font-size: var(--fs-xs); color: var(--muted); line-height: 1.4; }
+
+    /* --- Result --- */
+    .result { margin-top: var(--sp-5); }
+    .cards2 { display: grid; grid-template-columns: 1.3fr 1fr; gap: var(--sp-4); }
+    .panel {
+      background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+      padding: var(--sp-4) var(--sp-5); box-shadow: var(--shadow-2);
+    }
+    .panel h2 {
+      margin: 0 0 var(--sp-3); font-size: var(--fs-sm); text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--muted); font-weight: 700;
+    }
+    .kcal-big { font-size: var(--fs-xl); font-weight: 800; letter-spacing: -0.01em; }
+    .kcal-big span { font-size: var(--fs-base); font-weight: 500; color: var(--muted); }
+    .macro-row { display: flex; gap: var(--sp-2); margin: var(--sp-3) 0 6px; flex-wrap: wrap; }
+    .badge {
+      flex: 1 1 90px; text-align: center; border: 1px solid var(--line);
+      border-radius: var(--radius-sm); padding: var(--sp-2) 4px; background: var(--surface);
+    }
+    .badge .num { font-size: 1.2rem; font-weight: 800; }
+    .badge .lbl { font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+    .badge.cal .num { color: var(--cal); }
+    .badge.pro .num { color: var(--pro); }
+    .badge.carb .num { color: var(--carb); }
+    .badge.fat .num { color: var(--fat); }
+    .note { color: var(--muted); font-size: var(--fs-sm); margin-top: var(--sp-2); }
+
+    .conf-score { font-size: var(--fs-2xl); font-weight: 800; letter-spacing: -0.02em; }
+    .conf-score span { font-size: var(--fs-sm); color: var(--muted); font-weight: 500; }
+    .why { margin: var(--sp-2) 0 0; padding: 0; list-style: none; font-size: var(--fs-sm); }
+    .why li { margin: 5px 0; }
+    .why .ok { color: var(--ok); }
+    .why .warn { color: var(--warn); }
+
+    /* --- Meal cards --- */
+    .meal {
+      background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+      padding: var(--sp-4) var(--sp-5); margin-top: var(--sp-3); box-shadow: var(--shadow-2);
+    }
+    .meal-head { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-3); }
+    .meal-head .icon {
+      flex: none; width: 38px; height: 38px; border-radius: var(--radius-sm);
+      background: var(--accent-soft); display: flex; align-items: center; justify-content: center;
+      font-size: 1.15rem;
+    }
+    .meal-head h3 { margin: 0; font-size: var(--fs-md); font-weight: 700; }
+    .ings { margin: 6px 0 var(--sp-3); padding-left: 0; list-style: none; }
+    .ings li {
+      margin: 0; padding: 7px 0; border-bottom: 1px solid var(--line-soft);
+      display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: var(--fs-sm);
+    }
+    .ings li:last-child { border-bottom: none; }
+    .mini { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+    .mini .badge { flex: 1 1 70px; padding: 6px 4px; }
+    .reason {
+      font-style: italic; color: var(--muted); margin: var(--sp-3) 0 0; font-size: var(--fs-sm);
+      padding-top: var(--sp-2); border-top: 1px dashed var(--line-soft);
+    }
+    /* Recipe links + nutrition notes: secondary to the dish name, but no
+       longer near-invisible - small solid pill chips instead of bare text. */
+    .recipe-link {
+      color: var(--accent-strong); text-decoration: none; font-size: var(--fs-xs); font-weight: 600;
+      background: var(--accent-soft); border-radius: var(--radius-pill); padding: 2px 9px;
+      white-space: nowrap;
+    }
+    .recipe-link:hover { background: #dce9ff; text-decoration: none; }
+    .nutrition-note {
+      color: var(--muted); font-size: var(--fs-xs); background: var(--surface-sunken);
+      border-radius: var(--radius-pill); padding: 2px 9px; white-space: normal;
+    }
+    .disclaimer { color: var(--muted); font-size: var(--fs-xs); margin: var(--sp-5) 4px 0; }
+
+    /* --- Multi-day plan --- */
+    .day-nav { display: flex; gap: 6px; flex-wrap: wrap; margin: var(--sp-4) 0 0; }
+    .day-nav a {
+      font-size: var(--fs-sm); font-weight: 600; color: var(--accent); text-decoration: none;
+      background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-pill); padding: 6px 13px;
+    }
+    .day-nav a:hover { border-color: var(--accent); background: var(--accent-soft); }
+    .day-block { margin-top: var(--sp-6); padding-top: 4px; border-top: 2px solid var(--line); scroll-margin-top: 14px; }
+    .day-heading {
+      display: inline-block; margin: var(--sp-4) 0 var(--sp-3); padding: 5px 14px;
+      font-size: var(--fs-sm); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+      color: var(--accent-strong); background: var(--accent-soft); border-radius: var(--radius-pill);
+    }
+
+    /* --- Chat ("Ask AthleteOS") - visually tied to the plan above it --- */
+    .chat-panel { margin-top: var(--sp-5); border-top: 3px solid var(--accent-soft); }
+    .chat-panel .chat-eyebrow {
+      margin: 0 0 2px; font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--accent-strong); font-weight: 700;
+    }
+    .chat-panel h2 { margin: 0 0 var(--sp-3); font-size: var(--fs-md); text-transform: none; letter-spacing: 0; color: var(--ink); font-weight: 700; }
+    .chat-log { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+    .chat-log:empty { display: none; }
+    .chat-msg { padding: 8px 12px; border-radius: var(--radius-sm); max-width: 85%; font-size: 0.92rem; white-space: pre-wrap; }
+    .chat-msg.user { align-self: flex-end; background: var(--accent); color: var(--accent-ink); }
+    .chat-msg.assistant { align-self: flex-start; background: var(--surface-sunken); color: var(--ink); }
+    .chat-msg.error { align-self: flex-start; background: var(--err-bg); color: var(--err); }
+    .chat-form { display: flex; gap: var(--sp-2); }
+    .chat-form input { flex: 1; }
+    .chat-form button { width: auto; padding: 9px 16px; }
+    .chat-hint { color: var(--muted); font-size: var(--fs-xs); margin: var(--sp-3) 0 0; }
+
+    /* --- Responsive --- */
+    @media (max-width: 620px) {
+      .cards2 { grid-template-columns: 1fr; }
+      .brand-mark { width: 38px; height: 38px; font-size: 1.1rem; }
+      header h1 { font-size: 1.25rem; }
+      form { padding: var(--sp-4); }
+      .panel, .meal { padding: var(--sp-3) var(--sp-4); }
+    }
+    @media (max-width: 420px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">A</div>
+        <div>
+          <h1>AthleteOS</h1>
+          <p class="tagline">Personalized nutrition plans built around your training, goals, region and pantry — plus a coach you can ask questions.</p>
+        </div>
+      </div>
+    </header>
+
+    <!-- Athlete profile switcher. The display name is a LABEL only - each
+         athlete is identified internally by a UUID generated here (never
+         shown in the UI - see renderAthleteOptions()'s short suffix, which
+         is what keeps two same-named athletes visually distinguishable),
+         so two athletes with the same name never share stored memory or
+         chat history. -->
+    <div class="athlete-bar">
+      <div class="athlete-avatar" aria-hidden="true">👤</div>
+      <div class="athlete-bar-label">
+        <span class="eyebrow">Planning for</span>
+        <label for="athlete-select" class="visually-hidden">Athlete</label>
+      </div>
+      <select id="athlete-select"></select>
+      <button type="button" id="new-athlete-btn">+ New athlete</button>
+      <span id="new-athlete-inline" class="new-athlete-inline" hidden>
+        <input type="text" id="new-athlete-name" placeholder="Name for the new athlete (a label only)" />
+        <button type="button" id="new-athlete-confirm">Add</button>
+        <button type="button" id="new-athlete-cancel">Cancel</button>
+      </span>
+    </div>
+
+    <!-- My Recipes: this athlete's own saved homemade/family recipes.
+         Persistent (unlike home ingredients, which are per-request only) -
+         reloaded from the server whenever the active athlete changes, at
+         the same three points loadAthleteProfile() already is. Saving a
+         recipe here never guarantees it will be recommended in a plan -
+         that safety decision happens separately, at generation/chat time. -->
+    <section class="panel recipes-panel">
+      <div class="recipes-head">
+        <div>
+          <h2>My Recipes</h2>
+          <p class="recipes-sub">Your own homemade/family recipes. AthleteOS may suggest one when it fits your profile — it's never forced into a plan.</p>
+        </div>
+        <button type="button" id="add-recipe-btn">+ Add recipe</button>
+      </div>
+
+      <div id="recipe-form-inline" class="recipe-form-inline" hidden>
+        <div class="grid">
+          <div class="field field-wide">
+            <label for="recipe-name">Recipe name</label>
+            <input type="text" id="recipe-name" placeholder="e.g. Mom's Chicken Curry" />
+          </div>
+          <div class="field field-wide">
+            <label for="recipe-ingredients">Ingredients</label>
+            <textarea id="recipe-ingredients" rows="2" placeholder="e.g. Chicken, Onion, Tomato, Ginger, Garlic, Spices"></textarea>
+          </div>
+          <div class="field">
+            <label for="recipe-servings">Servings <span class="opt-note">(optional)</span></label>
+            <input type="text" id="recipe-servings" placeholder="e.g. 4 servings" />
+          </div>
+          <div class="field field-wide">
+            <label for="recipe-method">Preparation/method <span class="opt-note">(optional)</span></label>
+            <textarea id="recipe-method" rows="2"></textarea>
+          </div>
+          <div class="field field-wide">
+            <label for="recipe-notes">Notes <span class="opt-note">(optional)</span></label>
+            <textarea id="recipe-notes" rows="2"></textarea>
+          </div>
+        </div>
+        <div id="recipe-form-error" class="recipe-form-error" hidden></div>
+        <div class="recipe-form-actions">
+          <button type="button" id="recipe-save-btn">Save recipe</button>
+          <button type="button" id="recipe-cancel-btn">Cancel</button>
+        </div>
+      </div>
+
+      <div id="recipe-list" class="recipe-list"></div>
+    </section>
+
+    <!-- The form collects the same fields the API's MealPlanRequest expects.
+         Range/allowed-value validation happens on the SERVER (single source of
+         truth); this page marks mandatory fields required and shows whatever
+         the API reports, translated into plain English. Fields are grouped
+         into four visual sections purely for readability - every field keeps
+         its original `name`, so buildPayload()/FormData is unaffected by
+         which section it visually sits in. -->
+    <form id="profile-form">
+      <fieldset class="form-section">
+        <legend><span class="step-dot"></span>About you</legend>
+        <div class="grid">
+          <div class="field"><label>Age</label><input type="number" name="age" required /></div>
+          <div class="field"><label>Height (cm)</label><input type="number" name="height_cm" step="0.1" required /></div>
+          <div class="field"><label>Weight (kg)</label><input type="number" name="weight_kg" step="0.1" required /></div>
+          <div class="field"><label>Sex</label>
+            <select name="sex" required>
+              <option value="Male">Male</option>
+              <option value="Female">Female</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset class="form-section">
+        <legend><span class="step-dot"></span>Training &amp; goal</legend>
+        <div class="grid">
+          <div class="field"><label>Goal</label><input type="text" name="goal" placeholder="e.g. Football performance and muscle gain" required /></div>
+          <div class="field"><label>Training days / week</label><input type="number" name="training_days_per_week" required /></div>
+          <div class="field"><label>Training intensity</label>
+            <select name="training_intensity" required>
+              <option value="Low">Low</option>
+              <option value="Moderate">Moderate</option>
+              <option value="High">High</option>
+            </select>
+          </div>
+          <!-- Visually set apart as a planning CHOICE (how many days to
+               generate) rather than a fact about the athlete - same
+               <select name="duration_days">, just a distinct chip style. -->
+          <div class="field field-choice"><label>Plan duration</label>
+            <select name="duration_days" required>
+              <option value="1" selected>1 day</option>
+              <option value="7">7 days</option>
+            </select>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset class="form-section">
+        <legend><span class="step-dot"></span>Diet &amp; region</legend>
+        <div class="grid">
+          <div class="field"><label>Diet</label>
+            <select name="diet" required>
+              <option value="Vegetarian">Vegetarian</option>
+              <option value="Non-Vegetarian">Non-Vegetarian</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Region (city / state)</label>
+            <input type="text" name="region" placeholder="e.g. Lucknow, Uttar Pradesh" required />
+          </div>
+          <div class="field"><label>Allergies ('none' if any)</label><input type="text" name="allergies" placeholder="none" required /></div>
+        </div>
+        <p class="field-hint">Region helps tailor food and cuisine to your location — Indian cities/states get regional dishes; anywhere else gets a general international plan.</p>
+      </fieldset>
+
+      <fieldset class="form-section">
+        <legend><span class="step-dot"></span>Personalize <span class="opt-note">(optional)</span></legend>
+        <div class="grid">
+          <div class="field"><label>Budget per day</label><input type="text" name="budget_per_day" placeholder="e.g. Rs 300" /></div>
+          <div class="field"><label>Food preferences</label><input type="text" name="food_preferences" placeholder="e.g. eggs, paneer, dal" /></div>
+          <div class="field"><label>Foods to avoid</label><input type="text" name="foods_to_avoid" placeholder="e.g. fried food" /></div>
+          <div class="field"><label>Additional notes</label><input type="text" name="notes" placeholder="e.g. Match tomorrow at 9 AM" /></div>
+        </div>
+
+        <!-- Home ingredients: entirely optional, and deliberately NOT stored
+             anywhere. It describes today's kitchen, not a standing preference,
+             so it is cleared when the athlete is switched and starts empty on
+             every page load. -->
+        <div class="field field-wide">
+          <label for="available-ingredients">Ingredients available at home</label>
+          <textarea id="available-ingredients" name="available_ingredients" rows="3"
+                    autocomplete="off"
+                    placeholder="e.g. rice, dal, paneer, tomatoes, onions&#10;one per line or separated by commas"></textarea>
+          <p class="field-hint">
+            Optional — used only for this plan, never saved or remembered between
+            visits. If you add these, the plan leans on what you already have —
+            but it won't force in anything that clashes with your allergies,
+            diet or foods to avoid.
+          </p>
+        </div>
+      </fieldset>
+
+      <hr />
+      <button type="submit" id="submit-btn">Generate meal plan</button>
+    </form>
+
+    <div id="message"></div>
+    <div id="result" class="result">
+      <!-- Default/first-load content only - renderPlan()/renderMultiDayPlan()
+           overwrite this entire element's innerHTML the moment a plan is
+           generated, so nothing here needs to be cleared by hand. Static
+           copy only, no fabricated plan data. -->
+      <div class="empty-state">
+        <h2>Your plan will appear here</h2>
+        <p>Fill in the form above and generate a plan to see exactly what AthleteOS builds for you:</p>
+        <div class="empty-grid">
+          <div class="empty-item"><span class="glyph">🍽️</span><div><strong>Personalized meals</strong><span>Breakfast, lunch, snack and dinner chosen for your goal and diet.</span></div></div>
+          <div class="empty-item"><span class="glyph">📊</span><div><strong>Nutrition &amp; macros</strong><span>Calories, protein, carbs and fat for every meal and the full day.</span></div></div>
+          <div class="empty-item"><span class="glyph">🗺️</span><div><strong>Regional food</strong><span>Dishes that match your location's everyday cuisine.</span></div></div>
+          <div class="empty-item"><span class="glyph">🧺</span><div><strong>Pantry-aware (optional)</strong><span>Leans on ingredients you already have, if you list any.</span></div></div>
+          <div class="empty-item"><span class="glyph">💬</span><div><strong>Ask AthleteOS</strong><span>Chat about substitutions, timing or anything about your plan.</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <section class="panel chat-panel">
+      <p class="chat-eyebrow">Have questions about this plan?</p>
+      <h2>Ask AthleteOS</h2>
+      <div id="chat-log" class="chat-log"></div>
+      <form id="chat-form" class="chat-form">
+        <input type="text" id="chat-input" placeholder="Ask about your meal plan, substitutions, fueling..." autocomplete="off" />
+        <button type="submit" id="chat-send">Send</button>
+      </form>
+      <p class="chat-hint">Uses your saved profile and preferences. Not a substitute for medical or dietitian advice.</p>
+    </section>
+  </div>
+
+  <script>
+    // ------------------------------------------------------------------
+    // Athlete identity + chat session (Phase 1)
+    // ------------------------------------------------------------------
+    // Identity is a UUID, never a name: the athlete list below can contain
+    // several people called "Rahul Sharma" and each keeps entirely separate
+    // server-side memory, because only the UUID is ever sent as athlete_id.
+    //
+    // The session id lives ONLY in this page's memory (not localStorage, not
+    // sessionStorage), so a reload always starts a brand-new conversation and
+    // no transcript can come back. Switching athlete regenerates it too.
+    const ATHLETES_KEY = "athleteos.athletes";
+    const ACTIVE_KEY = "athleteos.active_athlete_id";
+
+    const athleteSelect = document.getElementById("athlete-select");
+    const newAthleteBtn = document.getElementById("new-athlete-btn");
+    const newAthleteInline = document.getElementById("new-athlete-inline");
+    const newAthleteNameInput = document.getElementById("new-athlete-name");
+    const newAthleteConfirmBtn = document.getElementById("new-athlete-confirm");
+    const newAthleteCancelBtn = document.getElementById("new-athlete-cancel");
+
+    let sessionId = newUuid();
+
+    function newUuid() {
+      if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+      // Fallback for older browsers / non-secure contexts.
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+      });
+    }
+
+    function loadAthletes() {
+      try {
+        const raw = localStorage.getItem(ATHLETES_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        return [];
+      }
+    }
+
+    function saveAthletes(athletes) {
+      localStorage.setItem(ATHLETES_KEY, JSON.stringify(athletes));
+    }
+
+    function getActiveAthleteId() {
+      return localStorage.getItem(ACTIVE_KEY);
+    }
+
+    function setActiveAthleteId(id) {
+      // The UUID stays purely internal - never rendered in the UI. Same-name
+      // athletes stay visually distinguishable via the short id suffix
+      // renderAthleteOptions() already appends to the dropdown label.
+      localStorage.setItem(ACTIVE_KEY, id);
+    }
+
+    function addAthlete(name) {
+      const athletes = loadAthletes();
+      // Same name is explicitly allowed - the UUID is what identifies them.
+      const athlete = { id: newUuid(), name: name };
+      athletes.push(athlete);
+      saveAthletes(athletes);
+      return athlete;
+    }
+
+    function renderAthleteOptions() {
+      const athletes = loadAthletes();
+      const activeId = getActiveAthleteId();
+      athleteSelect.innerHTML = athletes
+        .map((a) => {
+          const selected = a.id === activeId ? " selected" : "";
+          // Show a short id suffix so identical names stay distinguishable.
+          const suffix = a.id.slice(0, 4);
+          return `<option value="${a.id}"${selected}>${escapeHtml(a.name)} (${suffix})</option>`;
+        })
+        .join("");
+    }
+
+    function clearIngredients() {
+      const box = document.getElementById("available-ingredients");
+      if (box) box.value = "";
+    }
+
+    function startNewSession() {
+      sessionId = newUuid();
+      chatHistory = [];
+      chatLog.innerHTML = "";
+      // Home ingredients have the same lifetime as the chat transcript:
+      // per-athlete and ephemeral. One athlete's pantry must never be
+      // carried into another athlete's plan.
+      clearIngredients();
+    }
+
+    function initAthletes() {
+      let athletes = loadAthletes();
+      if (athletes.length === 0) {
+        const first = addAthlete("Athlete 1");
+        athletes = [first];
+      }
+      const activeId = getActiveAthleteId();
+      const stillExists = athletes.some((a) => a.id === activeId);
+      setActiveAthleteId(stillExists ? activeId : athletes[0].id);
+      renderAthleteOptions();
+      // Browsers restore form fields across a reload. Ingredients are
+      // deliberately ephemeral, so clear the box explicitly rather than
+      // relying on the browser not to bring it back.
+      clearIngredients();
+      // The active athlete's saved profile/preferences (if any) load into
+      // the form; chat/session/ingredients stay fresh regardless (handled
+      // above and by sessionId/chatHistory both starting fresh on load).
+      loadAthleteProfile(getActiveAthleteId());
+      // Recipes are persistent (unlike ingredients) - reload THIS athlete's
+      // own saved list, same lifecycle as the saved profile.
+      loadRecipes(getActiveAthleteId());
+    }
+
+    // Populate the form with this athlete's saved Profile/Preference memory
+    // (age, height, weight, sex, diet, region, allergies, budget, food
+    // preferences, foods to avoid). Fields memory_integration.py never
+    // persists - goal, training days/intensity, notes - are deliberately
+    // left at their normal blank defaults every time, same as a brand-new
+    // athlete, since nothing is stored for them to load.
+    async function loadAthleteProfile(athleteId) {
+      form.reset();
+      try {
+        const response = await fetch(`/athlete/${athleteId}/profile`);
+        if (!response.ok) return;
+        const profile = await response.json();
+        for (const [key, value] of Object.entries(profile)) {
+          if (value === null || value === undefined) continue;
+          const field = form.elements[key];
+          if (field) field.value = value;
+        }
+      } catch (e) {
+        // No saved profile yet, or server unreachable - leave the form at
+        // its normal defaults rather than blocking the athlete switch.
+      }
+    }
+
+    athleteSelect.addEventListener("change", () => {
+      setActiveAthleteId(athleteSelect.value);
+      // A different athlete must never continue the previous conversation.
+      startNewSession();
+      clearMessage();
+      resultEl.innerHTML = "";
+      loadAthleteProfile(athleteSelect.value);
+      loadRecipes(athleteSelect.value);
+    });
+
+    newAthleteBtn.addEventListener("click", () => {
+      newAthleteBtn.hidden = true;
+      newAthleteInline.hidden = false;
+      newAthleteNameInput.value = "";
+      newAthleteNameInput.focus();
+    });
+
+    function closeNewAthleteInline() {
+      newAthleteInline.hidden = true;
+      newAthleteBtn.hidden = false;
+    }
+
+    function confirmNewAthlete() {
+      const name = newAthleteNameInput.value.trim();
+      if (!name) return;
+      const athlete = addAthlete(name);
+      setActiveAthleteId(athlete.id);
+      renderAthleteOptions();
+      startNewSession();
+      clearMessage();
+      resultEl.innerHTML = "";
+      form.reset();
+      closeNewAthleteInline();
+      loadRecipes(athlete.id);  // a brand-new athlete always has an empty recipe box
+    }
+
+    newAthleteConfirmBtn.addEventListener("click", confirmNewAthlete);
+    newAthleteCancelBtn.addEventListener("click", closeNewAthleteInline);
+    newAthleteNameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        confirmNewAthlete();
+      } else if (e.key === "Escape") {
+        closeNewAthleteInline();
+      }
+    });
+
+    // ------------------------------------------------------------------
+    // My Recipes (personal_recipes.py / /athlete/{id}/recipes)
+    // ------------------------------------------------------------------
+    // Persistent, per-athlete, server-stored - unlike home ingredients this
+    // is NOT cleared on athlete switch; it's re-fetched for whichever
+    // athlete is now active, at the same three points the saved profile
+    // already reloads at (see initAthletes/athleteSelect "change"/
+    // confirmNewAthlete above). Escaping happens the same way chat messages
+    // already do - via escapeHtml(), defined further below (function
+    // declarations are hoisted, so it's safely callable from here).
+    const addRecipeBtn = document.getElementById("add-recipe-btn");
+    const recipeFormInline = document.getElementById("recipe-form-inline");
+    const recipeNameInput = document.getElementById("recipe-name");
+    const recipeIngredientsInput = document.getElementById("recipe-ingredients");
+    const recipeServingsInput = document.getElementById("recipe-servings");
+    const recipeMethodInput = document.getElementById("recipe-method");
+    const recipeNotesInput = document.getElementById("recipe-notes");
+    const recipeFormError = document.getElementById("recipe-form-error");
+    const recipeSaveBtn = document.getElementById("recipe-save-btn");
+    const recipeCancelBtn = document.getElementById("recipe-cancel-btn");
+    const recipeListEl = document.getElementById("recipe-list");
+
+    function openRecipeForm() {
+      recipeFormInline.hidden = false;
+      addRecipeBtn.hidden = true;
+      recipeNameInput.value = "";
+      recipeIngredientsInput.value = "";
+      recipeServingsInput.value = "";
+      recipeMethodInput.value = "";
+      recipeNotesInput.value = "";
+      recipeFormError.hidden = true;
+      recipeNameInput.focus();
+    }
+
+    function closeRecipeForm() {
+      recipeFormInline.hidden = true;
+      addRecipeBtn.hidden = false;
+    }
+
+    addRecipeBtn.addEventListener("click", openRecipeForm);
+    recipeCancelBtn.addEventListener("click", closeRecipeForm);
+
+    function renderRecipeList(recipes) {
+      if (!recipes.length) {
+        recipeListEl.innerHTML = '<p class="recipe-empty">No saved recipes yet. Add one above.</p>';
+        return;
+      }
+      recipeListEl.innerHTML = recipes.map((r) => {
+        const optional = [
+          r.servings ? `<p><strong>Servings:</strong> ${escapeHtml(r.servings)}</p>` : "",
+          r.method ? `<p><strong>Method:</strong> ${escapeHtml(r.method)}</p>` : "",
+          r.notes ? `<p><strong>Notes:</strong> ${escapeHtml(r.notes)}</p>` : "",
+        ].join("");
+        return `
+          <details class="recipe-item">
+            <summary>
+              <span>${escapeHtml(r.name)}</span>
+              <span class="recipe-meta">${r.ingredients.length} ingredient${r.ingredients.length === 1 ? "" : "s"}</span>
+            </summary>
+            <div class="recipe-detail">
+              <p><strong>Ingredients:</strong> ${escapeHtml(r.ingredients.join(", "))}</p>
+              ${optional}
+              <button type="button" class="recipe-delete-btn" data-recipe-id="${r.id}">Delete</button>
+            </div>
+          </details>`;
+      }).join("");
+    }
+
+    async function loadRecipes(athleteId) {
+      closeRecipeForm();
+      try {
+        const response = await fetch(`/athlete/${athleteId}/recipes`);
+        if (!response.ok) { renderRecipeList([]); return; }
+        renderRecipeList(await response.json());
+      } catch (e) {
+        renderRecipeList([]);
+      }
+    }
+
+    // One delegated listener handles every recipe's delete button, since
+    // the list is re-rendered wholesale on every load/save/delete.
+    recipeListEl.addEventListener("click", async (event) => {
+      const target = event.target.closest(".recipe-delete-btn");
+      if (!target) return;
+      target.disabled = true;
+      try {
+        await fetch(`/athlete/${getActiveAthleteId()}/recipes/${target.dataset.recipeId}`, {
+          method: "DELETE",
+        });
+      } finally {
+        loadRecipes(getActiveAthleteId());
+      }
+    });
+
+    recipeSaveBtn.addEventListener("click", async () => {
+      const name = recipeNameInput.value.trim();
+      const ingredients = recipeIngredientsInput.value.trim();
+      if (!name || !ingredients) {
+        recipeFormError.textContent = "Recipe name and ingredients are required.";
+        recipeFormError.hidden = false;
+        return;
+      }
+      recipeSaveBtn.disabled = true;
+      try {
+        const response = await fetch(`/athlete/${getActiveAthleteId()}/recipes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name,
+            ingredients,
+            servings: recipeServingsInput.value.trim() || null,
+            method: recipeMethodInput.value.trim() || null,
+            notes: recipeNotesInput.value.trim() || null,
+          }),
+        });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          recipeFormError.textContent = err.detail || "Couldn't save that recipe. Please try again.";
+          recipeFormError.hidden = false;
+          return;
+        }
+        closeRecipeForm();
+        loadRecipes(getActiveAthleteId());
+      } catch (e) {
+        recipeFormError.textContent = "We couldn't reach the server. Please make sure it's running and try again.";
+        recipeFormError.hidden = false;
+      } finally {
+        recipeSaveBtn.disabled = false;
+      }
+    });
+
+    const form = document.getElementById("profile-form");
+    const btn = document.getElementById("submit-btn");
+    const messageEl = document.getElementById("message");
+    const resultEl = document.getElementById("result");
+
+    const NUMERIC = ["age", "height_cm", "weight_kg", "training_days_per_week", "duration_days"];
+    const OPTIONAL = ["budget_per_day", "food_preferences", "foods_to_avoid", "notes",
+                      "available_ingredients"];
+
+    const MEAL_ICON = { Breakfast: "🍳", Lunch: "🍛", Snack: "🍌", Dinner: "🍽️" };
+
+    const FIELD_LABELS = {
+      duration_days: "Plan duration",
+      age: "Age", height_cm: "Height", weight_kg: "Weight", sex: "Sex",
+      goal: "Goal", diet: "Diet", training_days_per_week: "Training days per week",
+      training_intensity: "Training intensity", region: "Region", allergies: "Allergies",
+      budget_per_day: "Budget", food_preferences: "Food preferences",
+      foods_to_avoid: "Foods to avoid", notes: "Notes",
+      available_ingredients: "Ingredients available at home",
+    };
+
+    let submitting = false;
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (submitting) return;            // prevent duplicate submissions
+      submitting = true;
+      setLoading(true);
+      clearMessage();
+      resultEl.innerHTML = "";
+
+      const payload = buildPayload();
+
+      try {
+        const response = await fetch("/meal-plan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          const err = await response.json();
+          showErrors(err);
+          return;
+        }
+        const result = await response.json();
+        if (result.days) {
+          renderMultiDayPlan(result);
+        } else {
+          renderPlan(result);
+        }
+      } catch (e) {
+        showMessage("We couldn't reach the server. Please make sure it's running and try again.");
+      } finally {
+        submitting = false;
+        setLoading(false);              // always restore the button
+      }
+    });
+
+    function buildPayload() {
+      const data = new FormData(form);
+      const payload = {};
+      for (const [key, value] of data.entries()) {
+        if (NUMERIC.includes(key)) {
+          payload[key] = value === "" ? null : Number(value);
+        } else if (OPTIONAL.includes(key)) {
+          payload[key] = value.trim() === "" ? null : value.trim();
+        } else {
+          payload[key] = value;
+        }
+      }
+      // The ingredients box accepts one item per line as well as commas;
+      // the server splits on commas, so fold newlines into commas here.
+      if (payload.available_ingredients) {
+        payload.available_ingredients = payload.available_ingredients
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .join(", ");
+      }
+      // Identity: which athlete's stored memory this plan belongs to.
+      payload.athlete_id = getActiveAthleteId();
+      return payload;
+    }
+
+    function setLoading(on) {
+      btn.disabled = on;
+      btn.innerHTML = on
+        ? '<span class="spinner"></span>Generating your meal plan...'
+        : "Generate meal plan";
+    }
+
+    function clearMessage() { messageEl.innerHTML = ""; clearFieldErrors(); }
+
+    function clearFieldErrors() {
+      form.querySelectorAll(".field-error").forEach((el) => el.classList.remove("field-error"));
+    }
+
+    // Clear a field's red-outline error state as soon as the athlete starts
+    // fixing it, rather than making them resubmit to find out it's fixed.
+    form.addEventListener("input", (event) => {
+      if (event.target.classList.contains("field-error")) {
+        event.target.classList.remove("field-error");
+      }
+    });
+
+    function showMessage(text) {
+      messageEl.innerHTML = `<div class="msg error">${text}</div>`;
+      messageEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    // Turn FastAPI's structured 422 errors into plain-English lines, and
+    // outline the specific offending fields so the athlete doesn't have to
+    // match each line back to a field by reading the whole form.
+    function showErrors(err) {
+      if (!Array.isArray(err.detail)) {
+        showMessage("Something went wrong with your request. Please check your inputs and try again.");
+        return;
+      }
+      for (const d of err.detail) {
+        const field = form.elements[d.loc[d.loc.length - 1]];
+        if (field) field.classList.add("field-error");
+      }
+      const lines = err.detail.map(humanizeError);
+      messageEl.innerHTML =
+        `<div class="msg error"><strong>Please fix the following:</strong><ul>` +
+        lines.map((l) => `<li>${l}</li>`).join("") +
+        `</ul></div>`;
+      messageEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    function humanizeError(d) {
+      const field = d.loc[d.loc.length - 1];
+      const label = FIELD_LABELS[field] || field;
+      const ctx = d.ctx || {};
+      switch (d.type) {
+        case "missing": return `${label} is required.`;
+        case "greater_than_equal": return `${label} must be at least ${ctx.ge}.`;
+        case "less_than_equal": return `${label} must be at most ${ctx.le}.`;
+        case "greater_than": return `${label} must be greater than ${ctx.gt}.`;
+        case "less_than": return `${label} must be less than ${ctx.lt}.`;
+        case "string_too_short": return `${label} is required.`;
+        case "literal_error": return `${label} must be one of: ${ctx.expected}.`;
+        case "int_parsing":
+        case "float_parsing": return `${label} must be a number.`;
+        default: return `${label}: ${d.msg}`;
+      }
+    }
+
+    function badge(cls, num, unit, label) {
+      return `<div class="badge ${cls}"><div class="num">${num}${unit}</div><div class="lbl">${label}</div></div>`;
+    }
+
+    function nutritionPanel(s, heading) {
+      return `
+        <div class="panel">
+          <h2>${heading}</h2>
+          <div class="kcal-big">${s.total_calories} <span>kcal</span></div>
+          <div class="macro-row">
+            ${badge("pro", s.total_protein_g, " g", "Protein")}
+            ${badge("carb", s.total_carbs_g, " g", "Carbs")}
+            ${badge("fat", s.total_fats_g, " g", "Fat")}
+          </div>
+          <div class="note">${s.notes}</div>
+        </div>`;
+    }
+
+    function confidencePanel(plan) {
+      const whyItems = plan.confidence_reason.map((r) => {
+        const weak = /missing|unclear|unknown/i.test(r);
+        return `<li class="${weak ? "warn" : "ok"}">${weak ? "⚠️" : "✓"} ${r}</li>`;
+      }).join("");
+      return `
+        <div class="panel">
+          <h2>Plan Confidence</h2>
+          <div class="conf-score">${plan.confidence_score} <span>/ 10</span></div>
+          <div class="note">Why?</div>
+          <ul class="why">${whyItems}</ul>
+        </div>`;
+    }
+
+    function mealCard(m) {
+      const icon = MEAL_ICON[m.meal] || "🍽️";
+      const resourceByItem = {};
+      (m.resources || []).forEach((r) => { resourceByItem[r.item] = r; });
+      const ings = m.ingredients.map((i) => {
+        const r = resourceByItem[i.item];
+        const link = r
+          ? ` <a class="recipe-link" href="${r.url}" target="_blank" rel="noopener">recipe</a>`
+          : "";
+        // Deliberately NOT phrased as "this serving has X kcal" - every
+        // current nutrition entry is per 100g and has not been rescaled to
+        // the ingredient's own quantity (see nutrition_data.py), so the
+        // label says so explicitly rather than implying a precision the
+        // sourced data doesn't support.
+        const n = i.nutrition;
+        const nutrition = n
+          ? ` <span class="nutrition-note">(per 100g: ~${n.kcal} kcal · P ${n.protein_g}g · C ${n.carbs_g}g · F ${n.fat_g}g)</span>`
+          : "";
+        return `<li>${i.item} — ${i.quantity}${link}${nutrition}</li>`;
+      }).join("");
+      const macros = `
+        <div class="mini">
+          ${badge("cal", m.calories, "", "kcal")}
+          ${badge("pro", m.protein_g, " g", "Protein")}
+          ${badge("carb", m.carbs_g, " g", "Carbs")}
+          ${badge("fat", m.fats_g, " g", "Fat")}
+        </div>`;
+      return `
+        <div class="meal">
+          <div class="meal-head"><span class="icon">${icon}</span><h3>${m.meal}</h3></div>
+          <ul class="ings">${ings}</ul>
+          ${macros}
+          <div class="reason">${m.reasoning}</div>
+        </div>`;
+    }
+
+    function renderPlan(plan) {
+      const summaryPanel = nutritionPanel(plan.day_summary, "Today's Nutrition Summary");
+      const meals = plan.meals.map(mealCard).join("");
+
+      resultEl.innerHTML =
+        `<div class="cards2">${summaryPanel}${confidencePanel(plan)}</div>` +
+        meals +
+        `<p class="disclaimer">${plan.disclaimer}</p>`;
+    }
+
+    // Compact weekly rollup - pure aggregation of day_summary figures the
+    // API already returns (no new backend data). Reuses the same
+    // kcal-big/macro-row/badge/note markup nutritionPanel() uses, so it
+    // looks like a natural part of the existing design rather than a new
+    // component.
+    function weeklyOverviewPanel(plan) {
+      const totals = plan.days.reduce((acc, day) => {
+        const s = day.day_summary;
+        acc.cal += s.total_calories;
+        acc.pro += s.total_protein_g;
+        acc.carb += s.total_carbs_g;
+        acc.fat += s.total_fats_g;
+        return acc;
+      }, { cal: 0, pro: 0, carb: 0, fat: 0 });
+      const n = plan.days.length;
+      const avg = {
+        cal: Math.round(totals.cal / n),
+        pro: Math.round(totals.pro / n),
+        carb: Math.round(totals.carb / n),
+        fat: Math.round(totals.fat / n),
+      };
+      return `
+        <div class="panel">
+          <h2>Weekly Overview</h2>
+          <div class="kcal-big">${avg.cal} <span>avg kcal/day</span></div>
+          <div class="macro-row">
+            ${badge("pro", avg.pro, " g", "Avg Protein")}
+            ${badge("carb", avg.carb, " g", "Avg Carbs")}
+            ${badge("fat", avg.fat, " g", "Avg Fat")}
+          </div>
+          <div class="note">${totals.cal.toLocaleString()} kcal total across ${n} days</div>
+        </div>`;
+    }
+
+    // Simple anchor links to jump between days - not a rebuilt navigation
+    // system, just <a href="#day-N"> pills into each day-block's id.
+    function dayNavPanel(days) {
+      const links = days.map((d) => `<a href="#day-${d.day}">Day ${d.day}</a>`).join("");
+      return `<nav class="day-nav" aria-label="Jump to a day">${links}</nav>`;
+    }
+
+    // Renders a "duration_days" > 1 response: one section per day, each with
+    // its own nutrition summary and the same four meal cards renderPlan()
+    // uses for the single-day case (mealCard() is shared, not duplicated).
+    // Plan Confidence is shown once at the top - it reflects how complete
+    // the athlete's PROFILE is, not anything that varies day to day.
+    function renderMultiDayPlan(plan) {
+      const daysHtml = plan.days.map((day) => {
+        const summaryPanel = nutritionPanel(day.day_summary, `Day ${day.day} Nutrition Summary`);
+        const meals = day.meals.map(mealCard).join("");
+        return `
+          <section class="day-block" id="day-${day.day}">
+            <h2 class="day-heading">Day ${day.day}</h2>
+            ${summaryPanel}
+            ${meals}
+          </section>`;
+      }).join("");
+
+      resultEl.innerHTML =
+        `<div class="cards2">${weeklyOverviewPanel(plan)}${confidencePanel(plan)}</div>` +
+        dayNavPanel(plan.days) +
+        daysHtml +
+        `<p class="disclaimer">${plan.disclaimer}</p>`;
+    }
+
+    // --- Ask AthleteOS chat ---
+    const chatForm = document.getElementById("chat-form");
+    const chatInput = document.getElementById("chat-input");
+    const chatSend = document.getElementById("chat-send");
+    const chatLog = document.getElementById("chat-log");
+
+    let chatHistory = [];  // {role: "user"|"assistant", content: string}[], sent back each turn
+    let chatSending = false;
+
+    function escapeHtml(text) {
+      const div = document.createElement("div");
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function appendChatMessage(role, text) {
+      const bubble = document.createElement("div");
+      bubble.className = `chat-msg ${role}`;
+      bubble.innerHTML = escapeHtml(text);
+      chatLog.appendChild(bubble);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    chatForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const message = chatInput.value.trim();
+      if (!message || chatSending) return;
+
+      chatSending = true;
+      chatSend.disabled = true;
+      appendChatMessage("user", message);
+      chatInput.value = "";
+
+      try {
+        const response = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message,
+            history: chatHistory,
+            athlete_id: getActiveAthleteId(),
+            session_id: sessionId,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          appendChatMessage("error", err.detail || "Ask AthleteOS couldn't respond right now. Please try again.");
+          return;
+        }
+
+        const data = await response.json();
+        appendChatMessage("assistant", data.reply);
+        chatHistory.push({ role: "user", content: message });
+        chatHistory.push({ role: "assistant", content: data.reply });
+      } catch (e) {
+        appendChatMessage("error", "We couldn't reach the server. Please make sure it's running and try again.");
+      } finally {
+        chatSending = false;
+        chatSend.disabled = false;
+        chatInput.focus();
+      }
+    });
+
+    // Runs last, once every element and handler above exists. sessionId was
+    // already generated fresh on this page load, so a reload always begins
+    // with an empty conversation.
+    initAthletes();
+  </script>
+</body>
+</html>
