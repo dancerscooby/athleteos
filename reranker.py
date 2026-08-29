@@ -40,7 +40,10 @@ def load_reranker(model_name=RERANKER_MODEL_NAME):
     global _reranker
     if _reranker is None:
         logger.info("Loading reranker model '%s'...", model_name)
-        _reranker = TextCrossEncoder(model_name)
+        # enable_cpu_mem_arena=False: see retriever.load_model()'s comment -
+        # same ONNX Runtime arena-growth issue, same fix, applied to both
+        # models since both run inference on every RAG request.
+        _reranker = TextCrossEncoder(model_name, enable_cpu_mem_arena=False)
         logger.info("Reranker model loaded.")
     return _reranker
 

@@ -75,7 +75,15 @@ def load_model(model_name=MODEL_NAME):
     global _model
     if _model is None:
         logger.info("Loading embedding model '%s'...", model_name)
-        _model = TextEmbedding(model_name)
+        # enable_cpu_mem_arena=False: ONNX Runtime's default CPU memory
+        # arena grows on every inference call and never releases memory
+        # back to the OS, even for repeated identical inputs - measured
+        # (see the memory-growth investigation) at ~30-45MB of RSS growth
+        # PER REQUEST, unbounded, which alone exceeded Render's 512MB
+        # free-tier limit after only a handful of real requests. Disabling
+        # the arena keeps memory flat across requests (~0.25MB/request)
+        # instead of growing without bound.
+        _model = TextEmbedding(model_name, enable_cpu_mem_arena=False)
         logger.info("Embedding model loaded.")
     return _model
 
