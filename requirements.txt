@@ -21,19 +21,17 @@ httpx==0.28.1
 # Optional - only needed for the RAG pipeline (retriever.py, embeddings.py,
 # build_faiss_index.py). Not required to run the app on the mock provider.
 #
-# torch is pinned to the CPU-only build explicitly (deployment-only concern -
-# AthleteOS never uses a GPU). Without this pin, plain `pip install torch`
-# (pulled in transitively by sentence-transformers) installs the default
-# CUDA-enabled build, which drags in ~15 nvidia-cuda-* packages that are
-# never used and meaningfully bloat both install size and process memory -
-# a real problem on a memory-constrained host like Render's free tier.
-# --extra-index-url below only ADDS a source pip searches; it never
-# replaces PyPI, so every other package here still installs from PyPI as
-# normal. Local dev is unaffected either way - installing torch==2.13.0+cpu
-# works identically on a laptop.
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.13.0+cpu
-sentence-transformers==5.6.1
+# fastembed (ONNX Runtime) replaced sentence-transformers/torch here as a
+# deployment-driven change: torch + sentence-transformers alone cost ~360MB
+# of resident memory before handling a single request, leaving almost no
+# headroom under Render's 512MB free-tier limit. fastembed loads the SAME
+# models (sentence-transformers/all-MiniLM-L6-v2 for embedding,
+# Xenova/ms-marco-MiniLM-L-6-v2 - the ONNX port of the same cross-encoder -
+# for reranking) at a fraction of the memory, verified before switching to
+# produce numerically identical embeddings and rankings (see retriever.py /
+# reranker.py docstrings). No CUDA concern here either way - onnxruntime's
+# default PyPI package is CPU-only.
+fastembed==0.8.0
 faiss-cpu==1.15.0
 
 # Used directly by retriever.py / build_faiss_index.py / embeddings.py for

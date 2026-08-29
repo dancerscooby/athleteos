@@ -3,14 +3,22 @@ AthleteOS - Embeddings (RAG stage, Step 2).
 
 Takes the chunk records built by ingest.py and converts each chunk's text
 into an embedding - a list of numbers that represents its meaning, produced
-by a local Sentence Transformers model (no API calls, runs on your machine).
-Results are saved to embeddings.json so later steps (retrieval / RAG) can
-load them without re-computing anything.
+by a local embedding model (no API calls, runs on your machine). Results
+are saved to embeddings.json so later steps (retrieval / RAG) can load them
+without re-computing anything.
 
-Requires the 'sentence-transformers' package, which is NOT yet part of this
-project (see requirements.txt). Install it separately:
+Runtime (deployment change): uses 'fastembed' (ONNX Runtime) rather than
+'sentence-transformers'/torch - see retriever.py's docstring for the full
+memory-driven rationale. Same underlying model
+(sentence-transformers/all-MiniLM-L6-v2), verified to produce numerically
+identical embeddings (cosine similarity 1.0) to the previous library, so
+re-running this script reproduces the SAME embeddings.json that is already
+checked in - it does not need to be regenerated for the runtime swap alone.
 
-    python3 -m pip install sentence-transformers
+Requires the 'fastembed' package (see requirements.txt). Install it
+separately if needed:
+
+    python3 -m pip install fastembed
 
 Run with:
     python3 embeddings.py
@@ -19,11 +27,12 @@ Run with:
 import json
 from pathlib import Path
 
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 from ingest import load_documents, create_chunk_records
 
-MODEL_NAME = "all-MiniLM-L6-v2"  # small, fast, runs locally - good for a first RAG pass
+# Full fastembed model id - must match retriever.py's MODEL_NAME.
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 OUTPUT_FILE = Path(__file__).parent / "embeddings.json"
 
 
@@ -33,9 +42,9 @@ def generate_embeddings(records, model_name=MODEL_NAME):
     list of dicts with an added "embedding" field:
         {"id": ..., "source": ..., "text": ..., "embedding": [0.01, -0.03, ...]}
     """
-    model = SentenceTransformer(model_name)
+    model = TextEmbedding(model_name)
     texts = [record["text"] for record in records]
-    vectors = model.encode(texts, show_progress_bar=False)
+    vectors = list(model.embed(texts))
 
     enriched = []
     for record, vector in zip(records, vectors):

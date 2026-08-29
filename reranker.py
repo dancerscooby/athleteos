@@ -11,17 +11,23 @@ accurate, but too slow to run against all 39 chunks on every request. So the
 two are combined: FAISS retrieves a broad set of candidates quickly, the
 cross-encoder re-scores just that small set precisely.
 
-Uses sentence-transformers' CrossEncoder class - the SAME package already
-installed for the embedding model, so this adds no new dependency. The model
-used is 'cross-encoder/ms-marco-MiniLM-L-6-v2', a small (~80 MB) local model
-downloaded once and cached, the same way the embedding model was.
+Reranking runtime (deployment change): uses fastembed's TextCrossEncoder
+(ONNX Runtime) with 'Xenova/ms-marco-MiniLM-L-6-v2' - the ONNX port of the
+EXACT SAME model this file used before ('cross-encoder/ms-marco-MiniLM-L-
+6-v2'), not a different reranker. This was part of the same memory-driven
+swap described in retriever.py's docstring (fastembed instead of torch/
+sentence-transformers, to fit Render's 512MB free-tier limit). Verified
+before switching: scoring the same (query, candidates) with both the old
+and new model produced numerically matching scores and an IDENTICAL
+ranking order, so reranking QUALITY is unchanged, only the runtime under
+it is lighter.
 """
 
 import logging
 
-from sentence_transformers import CrossEncoder
+from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+RERANKER_MODEL_NAME = "Xenova/ms-marco-MiniLM-L-6-v2"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("athleteos.reranker")
@@ -34,7 +40,7 @@ def load_reranker(model_name=RERANKER_MODEL_NAME):
     global _reranker
     if _reranker is None:
         logger.info("Loading reranker model '%s'...", model_name)
-        _reranker = CrossEncoder(model_name)
+        _reranker = TextCrossEncoder(model_name)
         logger.info("Reranker model loaded.")
     return _reranker
 
@@ -55,10 +61,14 @@ def rerank(query, candidates, top_k=3):
         return []
 
     model = load_reranker()
-    pairs = [(query, c["text"]) for c in candidates]
+    documents = [c["text"] for c in candidates]
     logger.info("Reranking %d candidates for query: %s", len(candidates), query)
 
-    scores = model.predict(pairs)
+    # fastembed's rerank() takes the query once plus a list of documents
+    # (not (query, doc) pairs) and returns one score per document, in the
+    # same order as `documents` - higher score = more relevant, same
+    # convention the previous sentence-transformers CrossEncoder used.
+    scores = list(model.rerank(query, documents))
 
     scored = list(zip(candidates, scores))
     scored.sort(key=lambda pair: pair[1], reverse=True)

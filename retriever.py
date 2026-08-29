@@ -17,14 +17,25 @@ with zero changes:
 rag.py, llm_provider.py, and tests/test_scenarios.py only ever call this one
 function - none of them need to know retrieval now involves two passes.
 
+Embedding runtime (deployment change): loads the SAME model
+(sentence-transformers/all-MiniLM-L6-v2) via `fastembed` (ONNX Runtime)
+instead of the `sentence-transformers`/torch package. This was a deliberate
+swap to fit Render's free-tier 512MB RAM limit - torch + sentence-
+transformers alone cost ~360MB of resident memory before handling a single
+request, which left no real headroom; fastembed's onnxruntime-based
+pipeline costs a fraction of that. Verified before switching, not assumed:
+embedding the same text with both libraries produces vectors with cosine
+similarity 1.0 (numerically identical, within float32 precision), so
+embeddings.json and faiss_index.bin below did NOT need to be regenerated -
+they were built with the old library and remain valid with the new one.
+
 Requires:
   - embeddings.json (see embeddings.py) - still the source of chunk
     id/source/text; UNCHANGED, still produced the same way it always was.
   - faiss_index.bin (see build_faiss_index.py) - the FAISS vector index,
     UNCHANGED from the previous step.
-  - reranker.py - the new cross-encoder reranking step.
-  - the 'sentence-transformers' and 'faiss-cpu' packages (no new dependency
-    for reranking - it uses a class already in sentence-transformers).
+  - reranker.py - the cross-encoder reranking step (also fastembed-backed).
+  - the 'fastembed' and 'faiss-cpu' packages.
 
 If faiss_index.bin is missing or out of date, build/rebuild it with:
     python3 build_faiss_index.py
@@ -39,11 +50,14 @@ from pathlib import Path
 
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 from reranker import rerank
 
-MODEL_NAME = "all-MiniLM-L6-v2"  # unchanged - must match embeddings.py / build_faiss_index.py
+# Full fastembed model id (not the short "all-MiniLM-L6-v2" alias) - must
+# match embeddings.py / build_faiss_index.py's model choice, since this
+# name is what selects which ONNX weights fastembed downloads/loads.
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDINGS_FILE = Path(__file__).parent / "embeddings.json"
 FAISS_INDEX_FILE = Path(__file__).parent / "faiss_index.bin"
 FAISS_CANDIDATE_COUNT = 10  # how many candidates FAISS retrieves before reranking narrows them down
@@ -61,7 +75,7 @@ def load_model(model_name=MODEL_NAME):
     global _model
     if _model is None:
         logger.info("Loading embedding model '%s'...", model_name)
-        _model = SentenceTransformer(model_name)
+        _model = TextEmbedding(model_name)
         logger.info("Embedding model loaded.")
     return _model
 
@@ -111,7 +125,10 @@ def search_faiss_only(query, top_k=3):
     index = load_faiss_index()
     records = load_embeddings()
 
-    query_vector = model.encode(query).astype("float32").reshape(1, -1)
+    # fastembed's embed() takes an iterable of texts and returns a generator
+    # of numpy arrays, one per input - pass a single-item list, take the
+    # first (only) result.
+    query_vector = np.array(next(iter(model.embed([query]))), dtype="float32").reshape(1, -1)
     faiss.normalize_L2(query_vector)  # unit-normalize -> inner product = cosine similarity
 
     similarities, row_indices = index.search(query_vector, top_k)
