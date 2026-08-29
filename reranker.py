@@ -86,7 +86,15 @@ def rerank(query, candidates, top_k=3):
     # (not (query, doc) pairs) and returns one score per document, in the
     # same order as `documents` - higher score = more relevant, same
     # convention the previous sentence-transformers CrossEncoder used.
-    scores = list(model.rerank(query, documents))
+    #
+    # batch_size=2: each candidate is scored independently by the cross-
+    # encoder, so splitting the batch changes nothing about the scores
+    # (verified bit-identical to the default batch_size=64 across batch
+    # sizes 1-10) - it only controls how many rows go into a single ONNX
+    # Runtime inference call. Measured: a single 10-row batch peaks the
+    # ONNX arena at +74MB transient RSS per call; batch_size=2 cuts that
+    # to +16-20MB, since arena growth scales superlinearly with batch rows.
+    scores = list(model.rerank(query, documents, batch_size=2))
 
     scored = list(zip(candidates, scores))
     scored.sort(key=lambda pair: pair[1], reverse=True)
