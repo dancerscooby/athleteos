@@ -42,10 +42,34 @@ If faiss_index.bin is missing or out of date, build/rebuild it with:
 
 Run this file directly with:
     python3 retriever.py
+
+Concurrency (production-safety fix): FastAPI runs sync `def` endpoints
+(api.py's create_meal_plan/chat) in a shared thread pool, so concurrent
+HTTP requests become concurrent Python threads inside ONE process - this
+module's lazy singletons and inference calls need to account for that.
+
+  - _load_lock protects load_model()/load_faiss_index()/load_embeddings():
+    without it, concurrent FIRST requests on a freshly-started process can
+    all pass the "if _model is None" check before any of them finishes
+    constructing the model, each building its OWN separate ~300MB model
+    instance at once - measured directly (4 threads racing => 4 separate
+    TextEmbedding() constructions). Double-checked locking fixes this
+    without changing load_model()'s return value or callers.
+
+  - _retrieval_lock serializes retrieve_relevant_chunks() itself: measured
+    directly, concurrent inference on an ALREADY-warm, correctly-shared
+    model still costs real additional memory per simultaneous request
+    (peak RSS climbed from ~322MB sequential to ~512MB at just 3 concurrent
+    requests, ~528MB at 4) - even with no duplicate model loading involved.
+    Serializing retrieval to one request at a time keeps memory within the
+    measured warm sequential envelope regardless of how many requests
+    arrive together; it costs latency (requests queue briefly), not
+    correctness, and does not change what any single request returns.
 """
 
 import json
 import logging
+import threading
 from pathlib import Path
 
 import faiss
@@ -53,6 +77,10 @@ import numpy as np
 from fastembed import TextEmbedding
 
 from reranker import rerank
+
+# See the "Concurrency" note above for what each lock protects.
+_load_lock = threading.Lock()
+_retrieval_lock = threading.Lock()
 
 # Full fastembed model id (not the short "all-MiniLM-L6-v2" alias) - must
 # match embeddings.py / build_faiss_index.py's model choice, since this
@@ -71,20 +99,29 @@ _records = None  # chunk id/source/text records, loaded once and reused (see loa
 
 
 def load_model(model_name=MODEL_NAME):
-    """Load the embedding model once and cache it for reuse."""
+    """Load the embedding model once and cache it for reuse.
+
+    Thread-safe (double-checked locking, see _load_lock's module-level
+    note): the cheap, lock-free check lets the overwhelmingly common case
+    (already loaded) stay fast, while the lock only ever matters for the
+    handful of concurrent calls racing to do the FIRST load.
+    """
     global _model
     if _model is None:
-        logger.info("Loading embedding model '%s'...", model_name)
-        # enable_cpu_mem_arena=False: ONNX Runtime's default CPU memory
-        # arena grows on every inference call and never releases memory
-        # back to the OS, even for repeated identical inputs - measured
-        # (see the memory-growth investigation) at ~30-45MB of RSS growth
-        # PER REQUEST, unbounded, which alone exceeded Render's 512MB
-        # free-tier limit after only a handful of real requests. Disabling
-        # the arena keeps memory flat across requests (~0.25MB/request)
-        # instead of growing without bound.
-        _model = TextEmbedding(model_name, enable_cpu_mem_arena=False)
-        logger.info("Embedding model loaded.")
+        with _load_lock:
+            if _model is None:
+                logger.info("Loading embedding model '%s'...", model_name)
+                # enable_cpu_mem_arena=False: ONNX Runtime's default CPU
+                # memory arena grows on every inference call and never
+                # releases memory back to the OS, even for repeated
+                # identical inputs - measured (see the memory-growth
+                # investigation) at ~30-45MB of RSS growth PER REQUEST,
+                # unbounded, which alone exceeded Render's 512MB free-tier
+                # limit after only a handful of real requests. Disabling
+                # the arena keeps memory flat across requests
+                # (~0.25MB/request) instead of growing without bound.
+                _model = TextEmbedding(model_name, enable_cpu_mem_arena=False)
+                logger.info("Embedding model loaded.")
     return _model
 
 
@@ -92,31 +129,37 @@ def load_embeddings(path=EMBEDDINGS_FILE):
     """
     Load the chunk records (id/source/text/embedding) from disk. Still used
     to map a FAISS result row back to its id/source/text - cached so
-    repeated queries don't re-read the file every time.
+    repeated queries don't re-read the file every time. Thread-safe, same
+    double-checked locking as load_model().
     """
     global _records
     if _records is None:
-        logger.info("Loading chunk records from %s", path)
-        with open(path, encoding="utf-8") as f:
-            _records = json.load(f)
-        logger.info("Loaded %d chunk records.", len(_records))
+        with _load_lock:
+            if _records is None:
+                logger.info("Loading chunk records from %s", path)
+                with open(path, encoding="utf-8") as f:
+                    _records = json.load(f)
+                logger.info("Loaded %d chunk records.", len(_records))
     return _records
 
 
 def load_faiss_index(path=FAISS_INDEX_FILE):
-    """Load the local FAISS index once and cache it for reuse."""
+    """Load the local FAISS index once and cache it for reuse. Thread-safe,
+    same double-checked locking as load_model()."""
     global _index
     if _index is None:
-        if not Path(path).exists():
-            raise FileNotFoundError(
-                f"FAISS index not found at {path}. Build it first with: "
-                f"python3 build_faiss_index.py"
-            )
-        logger.info("Loading FAISS index from %s", path)
-        _index = faiss.read_index(str(path))
-        logger.info(
-            "FAISS index loaded: %d vectors, dimension %d", _index.ntotal, _index.d
-        )
+        with _load_lock:
+            if _index is None:
+                if not Path(path).exists():
+                    raise FileNotFoundError(
+                        f"FAISS index not found at {path}. Build it first with: "
+                        f"python3 build_faiss_index.py"
+                    )
+                logger.info("Loading FAISS index from %s", path)
+                _index = faiss.read_index(str(path))
+                logger.info(
+                    "FAISS index loaded: %d vectors, dimension %d", _index.ntotal, _index.d
+                )
     return _index
 
 
@@ -166,23 +209,31 @@ def retrieve_relevant_chunks(query, top_k=3):
     Returns a list of dicts: {"id", "source", "text", "similarity"} sorted
     from most to least relevant after reranking - identical shape to the
     previous FAISS-only implementation, so callers are unaffected.
+
+    Serialized (see _retrieval_lock's module-level note): only one call
+    runs its actual embedding/FAISS/reranking work at a time, process-wide.
+    A concurrent caller simply waits its turn rather than running
+    simultaneously - the RETURNED RESULT for any given query is exactly
+    the same either way, only the timing changes, which is what keeps
+    memory bounded under concurrent load.
     """
-    logger.info("Query: %s", query)
+    with _retrieval_lock:
+        logger.info("Query: %s", query)
 
-    candidate_k = max(FAISS_CANDIDATE_COUNT, top_k)  # never fetch fewer than requested
-    candidates = search_faiss_only(query, top_k=candidate_k)
-    logger.info("STAGE A - FAISS retrieval: %d candidates", len(candidates))
-    for rank, c in enumerate(candidates, start=1):
-        logger.info(
-            "  faiss candidate #%d: %s (source=%s, similarity=%.3f)",
-            rank, c["id"], c["source"], c["similarity"],
-        )
+        candidate_k = max(FAISS_CANDIDATE_COUNT, top_k)  # never fetch fewer than requested
+        candidates = search_faiss_only(query, top_k=candidate_k)
+        logger.info("STAGE A - FAISS retrieval: %d candidates", len(candidates))
+        for rank, c in enumerate(candidates, start=1):
+            logger.info(
+                "  faiss candidate #%d: %s (source=%s, similarity=%.3f)",
+                rank, c["id"], c["source"], c["similarity"],
+            )
 
-    logger.info("STAGE B - Reranking %d candidates down to top %d", len(candidates), top_k)
-    results = rerank(query, candidates, top_k=top_k)  # logs each rerank score itself
+        logger.info("STAGE B - Reranking %d candidates down to top %d", len(candidates), top_k)
+        results = rerank(query, candidates, top_k=top_k)  # logs each rerank score itself
 
-    logger.info("Returning %d chunks after reranking", len(results))
-    return results
+        logger.info("Returning %d chunks after reranking", len(results))
+        return results
 
 
 # ----------------------------------------------------------------------

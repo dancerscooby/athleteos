@@ -24,6 +24,7 @@ it is lighter.
 """
 
 import logging
+import threading
 
 from fastembed.rerank.cross_encoder import TextCrossEncoder
 
@@ -33,18 +34,32 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("athleteos.reranker")
 
 _reranker = None  # loaded once and reused (see load_reranker())
+# Protects the lazy load below - see retriever.py's module docstring
+# ("Concurrency") for the full rationale. rerank() itself needs no lock of
+# its own: its only caller, retriever.retrieve_relevant_chunks(), already
+# serializes the whole retrieval+rerank pipeline with its own lock.
+_load_lock = threading.Lock()
 
 
 def load_reranker(model_name=RERANKER_MODEL_NAME):
-    """Load the cross-encoder reranking model once and cache it for reuse."""
+    """Load the cross-encoder reranking model once and cache it for reuse.
+
+    Thread-safe (double-checked locking) - without this, concurrent FIRST
+    requests on a fresh process could each construct their own separate
+    reranker instance before any of them finished (measured directly: 4
+    racing threads produced 4 separate TextCrossEncoder() constructions).
+    """
     global _reranker
     if _reranker is None:
-        logger.info("Loading reranker model '%s'...", model_name)
-        # enable_cpu_mem_arena=False: see retriever.load_model()'s comment -
-        # same ONNX Runtime arena-growth issue, same fix, applied to both
-        # models since both run inference on every RAG request.
-        _reranker = TextCrossEncoder(model_name, enable_cpu_mem_arena=False)
-        logger.info("Reranker model loaded.")
+        with _load_lock:
+            if _reranker is None:
+                logger.info("Loading reranker model '%s'...", model_name)
+                # enable_cpu_mem_arena=False: see retriever.load_model()'s
+                # comment - same ONNX Runtime arena-growth issue, same fix,
+                # applied to both models since both run inference on every
+                # RAG request.
+                _reranker = TextCrossEncoder(model_name, enable_cpu_mem_arena=False)
+                logger.info("Reranker model loaded.")
     return _reranker
 
 
