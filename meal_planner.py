@@ -304,6 +304,93 @@ For "disclaimer", use exactly this text:
 """
 
 
+def build_multi_day_batch_prompt(profile, day_start, day_end, avoid_dishes=None):
+    """
+    Multi-day OpenRouter batch prompt (Step 6 extension): the same
+    instructions as build_prompt(), but for a CONTIGUOUS RANGE of days
+    (day_start..day_end) in one response, returned as a "days" list instead
+    of a single day - i.e. the batch-sized building block
+    openrouter_provider_multi_day() calls twice (days 1-4, then 5-7) rather
+    than a second food-selection system.
+
+    `avoid_dishes` (optional) is a flat list of ingredient names already used
+    in an earlier batch of the SAME week's plan - passed as a short text
+    instruction so the second call has a chance at cross-batch variety
+    without resending the entire first batch's response. Prototyped and
+    measured before this was written: this instruction is honored ONLY
+    partially (about 40% of listed dishes still got reused in testing), so
+    it is a best-effort nudge, not a guarantee - callers must not assume
+    zero repetition across batches.
+    """
+    days = day_end - day_start + 1
+    avoid_block = ""
+    if avoid_dishes:
+        avoid_block = (
+            "\nAVOID REPEATING THESE DISHES (already used earlier in this same "
+            "week's plan): " + ", ".join(sorted(avoid_dishes)) + "\n"
+        )
+
+    return f"""You are a sports nutritionist for Indian footballers who cannot afford a
+personal nutritionist. Give realistic, practical advice using foods that are
+actually available in the athlete's region and within their budget and culture.
+Prefer home-cooked, easily available Indian ingredients. Do not assume expensive
+supplements or imported foods. Be honest about uncertainty.
+
+ATHLETE PROFILE
+- Age: {profile['age']}
+- Height: {_format_number(profile['height_cm'])} cm
+- Weight: {_format_number(profile['weight_kg'])} kg
+- Sex: {profile['sex']}
+- Goal: {profile['goal']}
+- Diet: {profile['diet']}
+- Training: {profile['training_days_per_week']} days/week, intensity {profile['training_intensity']}
+- Region: {profile['region']}
+- Allergies: {profile['allergies']}
+
+{build_constraint_rules(profile)}
+{avoid_block}
+TASK
+Generate meal plans for days {day_start} through {day_end} ({days} day(s)) of a
+multi-day plan. Each day has exactly four meals: Breakfast, Lunch, Snack,
+Dinner. For each meal give ingredients with quantities, calories, protein,
+carbs and fats, a short reason why it suits THIS athlete, and any useful
+resources (recipe videos or articles). Also give an overall daily summary for
+each day, and ONE honest confidence score covering this batch.
+
+IMPORTANT: Vary the meals across these days - do not repeat the same dish
+combination on multiple days within this batch.
+
+Return ONLY valid JSON in exactly this shape:
+{{
+  "confidence_score": <number 0-10>,
+  "confidence_reason": [<short strings explaining the score>],
+  "days": [
+    {{
+      "day": <int, {day_start} to {day_end}>,
+      "day_summary": {{
+        "total_calories": <int>, "total_protein_g": <int>,
+        "total_carbs_g": <int>, "total_fats_g": <int>, "notes": "<string>"
+      }},
+      "meals": [
+        {{
+          "meal": "Breakfast",
+          "ingredients": [{{"item": "<string>", "quantity": "<string>"}}],
+          "calories": <int>, "protein_g": <int>, "carbs_g": <int>, "fats_g": <int>,
+          "reasoning": "<why this meal for this athlete>",
+          "resources": [{{"type": "youtube", "title": "<string>", "url": "<string>", "item": "<string>"}}]
+        }}
+      ]
+    }}
+  ],
+  "disclaimer": "<string>"
+}}
+Each resource's "item" must be an EXACT match of one of that same meal's
+ingredient "item" names.
+For "disclaimer", use exactly this text:
+"{DISCLAIMER}"
+"""
+
+
 # ----------------------------------------------------------------------
 # 3. THE AI PROVIDERS  (interchangeable implementations)
 # ----------------------------------------------------------------------
@@ -1637,13 +1724,14 @@ def generate_meal_plan(profile, agent_context=None, days=1):
     `days` (optional, default 1 - Step 6/multi-day planning) is likewise
     additive: with days=1 this function takes EXACTLY the code path it
     always has (single-day dict: confidence_score/day_summary/meals/
-    disclaimer), for every provider. days > 1 is currently only implemented
-    for PROVIDER="mock" (see mock_provider_multi_day()) - the deterministic
-    provider is what the multi-day variety requirement (no second food-
-    selection system, cross-day awareness, full reproducibility) was built
-    against. Requesting days > 1 under "claude"/"openrouter" raises
-    NotImplementedError rather than silently ignoring `days` or calling the
-    LLM once per day with no cross-day awareness.
+    disclaimer), for every provider. days > 1 is implemented for
+    PROVIDER="mock" (see mock_provider_multi_day() - the deterministic
+    provider the multi-day variety requirement was originally built against)
+    and, as of the 4+3 batching prototype, for PROVIDER="openrouter" too
+    (see llm_provider.openrouter_provider_multi_day() - currently only
+    days=7 specifically, the only value the batching approach was validated
+    against). Requesting an unimplemented days/provider combination raises
+    NotImplementedError rather than silently ignoring `days`.
     """
     if days == 1:
         if PROVIDER == "mock":
@@ -1661,12 +1749,16 @@ def generate_meal_plan(profile, agent_context=None, days=1):
             return openrouter_provider(profile, agent_context)
         raise ValueError(f"Unknown provider: {PROVIDER!r}")
 
-    if PROVIDER != "mock":
-        raise NotImplementedError(
-            f"Multi-day plans (days={days}) are only implemented for "
-            f"PROVIDER='mock' right now; got PROVIDER={PROVIDER!r}."
-        )
-    return mock_provider_multi_day(profile, days, agent_context)
+    if PROVIDER == "mock":
+        return mock_provider_multi_day(profile, days, agent_context)
+    if PROVIDER == "openrouter":
+        # Same lazy-import reasoning as the days==1 branch above.
+        from llm_provider import openrouter_provider_multi_day
+        return openrouter_provider_multi_day(profile, days, agent_context)
+    raise NotImplementedError(
+        f"Multi-day plans (days={days}) are only implemented for "
+        f"PROVIDER='mock' or 'openrouter' right now; got PROVIDER={PROVIDER!r}."
+    )
 
 
 # ----------------------------------------------------------------------

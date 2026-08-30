@@ -50,7 +50,7 @@ import os
 
 from dotenv import load_dotenv
 
-from meal_planner import build_prompt, classify_personal_recipes
+from meal_planner import build_prompt, build_multi_day_batch_prompt, classify_personal_recipes
 from rag import get_context_block
 from tool_selector import run_with_tools
 
@@ -472,12 +472,17 @@ def claude_provider(profile, agent_context=None):
 # OpenRouter provider (free-tier, no structured-output guarantee)
 # ----------------------------------------------------------------------
 
-def _call_openrouter_once(messages, response_format, model):
+def _call_openrouter_once(messages, response_format, model, max_tokens=None):
     """
     One OpenRouter chat-completion HTTP call against a specific `model` -
     the actual request/response handling, unchanged from what
     call_openrouter() used to do inline. Raises LLMProviderError (or its
     RateLimitError subclass for HTTP 429) on any failure.
+
+    `max_tokens` defaults to OPENROUTER_MAX_TOKENS (the single-day budget)
+    when omitted - existing callers (openrouter_provider(), chat.py) are
+    completely unaffected. openrouter_provider_multi_day() is the only
+    caller that overrides it, with its own batch-sized budget.
     """
     try:
         import httpx
@@ -488,7 +493,7 @@ def _call_openrouter_once(messages, response_format, model):
 
     payload = {
         "model": model,
-        "max_tokens": OPENROUTER_MAX_TOKENS,
+        "max_tokens": max_tokens if max_tokens is not None else OPENROUTER_MAX_TOKENS,
         "reasoning": {"effort": OPENROUTER_EFFORT},
         "messages": messages,
     }
@@ -529,19 +534,24 @@ def _call_openrouter_once(messages, response_format, model):
     return text
 
 
-def call_openrouter(messages, response_format=None):
+def call_openrouter(messages, response_format=None, max_tokens=None):
     """
     Low-level OpenRouter chat-completion call - the ONE place in the app
     that knows how to talk to OpenRouter's API. Every OpenRouter-based
-    feature (openrouter_provider() below, and chat.py's chat feature)
-    reuses this instead of each becoming its own provider. Returns the raw
-    text content of the model's first choice; raises LLMProviderError on
-    any failure (missing key, network, malformed response) - the same
-    graceful-failure contract as every other provider in this file.
+    feature (openrouter_provider() below, openrouter_provider_multi_day(),
+    and chat.py's chat feature) reuses this instead of each becoming its own
+    provider. Returns the raw text content of the model's first choice;
+    raises LLMProviderError on any failure (missing key, network, malformed
+    response) - the same graceful-failure contract as every other provider
+    in this file.
 
     `response_format` is optional and passed straight through to OpenRouter
     (e.g. {"type": "json_object"} for callers that need JSON back); omitted
     entirely for callers that just want free text, like chat.
+
+    `max_tokens` is optional and defaults to OPENROUTER_MAX_TOKENS when
+    omitted - only openrouter_provider_multi_day() overrides it, for its
+    larger batch responses; every other existing caller is unaffected.
 
     Primary/fallback (Phase D): tries OPENROUTER_MODEL first; if that call
     raises ANY LLMProviderError (rate limit, network error, empty/malformed
@@ -557,7 +567,7 @@ def call_openrouter(messages, response_format=None):
         )
 
     try:
-        return _call_openrouter_once(messages, response_format, OPENROUTER_MODEL)
+        return _call_openrouter_once(messages, response_format, OPENROUTER_MODEL, max_tokens=max_tokens)
     except LLMProviderError as primary_error:
         if not OPENROUTER_FALLBACK_MODEL or OPENROUTER_FALLBACK_MODEL == OPENROUTER_MODEL:
             raise
@@ -566,7 +576,7 @@ def call_openrouter(messages, response_format=None):
             "fallback model %r",
             OPENROUTER_MODEL, primary_error, OPENROUTER_FALLBACK_MODEL,
         )
-        return _call_openrouter_once(messages, response_format, OPENROUTER_FALLBACK_MODEL)
+        return _call_openrouter_once(messages, response_format, OPENROUTER_FALLBACK_MODEL, max_tokens=max_tokens)
 
 
 def openrouter_provider(profile, agent_context=None):
@@ -617,3 +627,134 @@ def openrouter_provider(profile, agent_context=None):
     _validate_plan_shape(plan)
 
     return plan
+
+
+# ----------------------------------------------------------------------
+# OpenRouter multi-day provider (4+3 batching prototype)
+# ----------------------------------------------------------------------
+# A single OpenRouter call asking for a full 7-day plan was prototyped and
+# measured to be non-viable: OpenRouter's free-tier gateway enforces an
+# ~120s upstream idle timeout, and a complete 7-day response needs roughly
+# 7,000-9,000 completion tokens - long enough generation time to hit that
+# timeout regardless of max_tokens (confirmed empirically: both 8000 and
+# 10000-token attempts failed with "Upstream idle timeout exceeded", while
+# a 3000-token attempt simply truncated mid-response instead). Splitting
+# into two smaller batches (days 1-4, then days 5-7) was measured safe:
+# every batch size up to 4 days completed in under 60s, comfortably inside
+# the timeout, with clean JSON and no duplicate days.
+#
+# These are the measured completion-token counts for each batch size
+# (2=2762, 3=4354, 4=5466), each with headroom added for a safety margin -
+# NOT the same OPENROUTER_MAX_TOKENS used by the single-day path above,
+# which stays untouched.
+_MULTI_DAY_BATCH1_MAX_TOKENS = 6500  # days 1-4
+_MULTI_DAY_BATCH2_MAX_TOKENS = 5000  # days 5-7
+
+
+def _validate_batch_shape(batch):
+    """Raise LLMProviderError if a parsed multi-day BATCH response (one
+    call's worth of days, not the final merged plan) is missing required
+    keys or malformed - the batch-shaped equivalent of _validate_plan_shape()."""
+    required = ["confidence_score", "confidence_reason", "days", "disclaimer"]
+    missing = [k for k in required if k not in batch]
+    if missing:
+        raise LLMProviderError(f"Model batch response missing required fields: {missing}")
+    if not isinstance(batch["days"], list) or not batch["days"]:
+        raise LLMProviderError("Model batch response's 'days' must be a non-empty list.")
+    for day in batch["days"]:
+        day_missing = [k for k in ("day", "day_summary", "meals") if k not in day]
+        if day_missing:
+            raise LLMProviderError(f"Model batch response day is missing fields: {day_missing}")
+
+
+def _dish_names_used(days):
+    """Flat set of every ingredient "item" name across all meals in `days` -
+    the compact list passed to the next batch's prompt to encourage (not
+    guarantee - see build_multi_day_batch_prompt()'s docstring) cross-batch
+    variety, instead of resending the entire previous batch's response."""
+    names = set()
+    for day in days:
+        for meal in day.get("meals", []):
+            for ingredient in meal.get("ingredients", []):
+                item = ingredient.get("item")
+                if item:
+                    names.add(item)
+    return names
+
+
+def _generate_openrouter_batch(profile, agent_context, day_start, day_end, max_tokens, avoid_dishes=None):
+    """One OpenRouter call for days `day_start`..`day_end`. Reuses the exact
+    same prompt-composition, call_openrouter() (with its existing primary/
+    fallback retry behaviour), JSON parsing, and error-handling pattern
+    openrouter_provider() already uses for a single day - only the prompt
+    text and the (batch-scoped) max_tokens differ."""
+    base_prompt = build_multi_day_batch_prompt(profile, day_start, day_end, avoid_dishes=avoid_dishes)
+    rag_context = (agent_context or {}).get("rag_context") or ""
+    tool_results = (agent_context or {}).get("tool_results") or {}
+    personal_recipes = (agent_context or {}).get("personal_recipes") or []
+    recipes_context = _format_recipes(personal_recipes, profile) if personal_recipes else None
+    prompt = _compose_prompt(base_prompt, rag_context, tool_results, recipes_context)
+
+    logger.info(
+        "openrouter_provider_multi_day: days %d-%d, model=%s, prompt length=%d characters",
+        day_start, day_end, OPENROUTER_MODEL, len(prompt),
+    )
+
+    text = call_openrouter(
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        max_tokens=max_tokens,
+    )
+
+    try:
+        batch = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise LLMProviderError(
+            f"Could not parse the model's JSON for days {day_start}-{day_end}: {exc}"
+        ) from exc
+
+    _validate_batch_shape(batch)
+    return batch
+
+
+def openrouter_provider_multi_day(profile, days, agent_context=None):
+    """
+    Multi-day OpenRouter plan via the 4+3 batching approach (see the module
+    comment above this section for why a single 7-day call isn't viable).
+
+    Currently only days=7 is implemented - the only split this batching
+    approach was actually measured against. Same fail-GRACEFULLY contract
+    as every other provider here: raises LLMProviderError on any failure in
+    either batch: rather than returning a partial (days 1-4 only) plan, so
+    the mock provider stays usable as a fallback (see the module docstring)
+    if either half fails.
+
+    Reuses everything the single-day openrouter_provider() does - the same
+    call_openrouter() (with its existing primary/fallback retry), the same
+    "none" reasoning effort, the same JSON-object response format - only the
+    prompt (build_multi_day_batch_prompt() instead of build_prompt()) and
+    the per-batch max_tokens differ.
+    """
+    if days != 7:
+        raise NotImplementedError(
+            f"OpenRouter multi-day plans currently only support days=7 (4+3 "
+            f"batching); got days={days}."
+        )
+
+    batch1 = _generate_openrouter_batch(
+        profile, agent_context, day_start=1, day_end=4,
+        max_tokens=_MULTI_DAY_BATCH1_MAX_TOKENS,
+    )
+    dishes_used = _dish_names_used(batch1["days"])
+    batch2 = _generate_openrouter_batch(
+        profile, agent_context, day_start=5, day_end=7,
+        max_tokens=_MULTI_DAY_BATCH2_MAX_TOKENS, avoid_dishes=dishes_used,
+    )
+
+    return {
+        "duration_days": days,
+        "confidence_score": batch1["confidence_score"],
+        "confidence_reason": batch1["confidence_reason"],
+        "days": batch1["days"] + batch2["days"],
+        "disclaimer": batch1["disclaimer"],
+    }
