@@ -78,23 +78,33 @@ LLM_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 # OpenRouter (openrouter_provider) - a second, free-tier provider. The model
 # ID is env-overridable because OpenRouter's free lineup rotates; verify the
 # current one at https://openrouter.ai/models?max_price=0 before relying on
-# the default. Confirmed free and working (live-tested, not guessed) as of
-# 2026-08-11: openai/gpt-oss-20b:free.
+# the default. The previous defaults (openai/gpt-oss-120b:free / -20b:free)
+# were removed from OpenRouter's free tier and started returning HTTP 404 -
+# replaced 2026-08-30 with two models confirmed live via OpenRouter's own
+# /api/v1/models and /api/v1/models/{id}/endpoints (both $0 pricing, both
+# reporting >99% uptime at verification time):
+#   - nvidia/nemotron-3-super-120b-a12b:free (primary)
+#   - google/gemma-4-31b-it:free (fallback - different provider/architecture
+#     for real redundancy, not just a second slug from the same vendor)
+# Both list "reasoning" and "response_format" in their supported_parameters,
+# so the reasoning-effort cap and response_format below are unchanged.
 #
-# gpt-oss-20b is a REASONING model - it spends hidden "reasoning" tokens
+# gpt-oss-20b was a REASONING model that spent hidden "reasoning" tokens
 # (counted against max_tokens) before writing its actual answer, and a long
-# prompt (e.g. with RAG context + tool results attached) can make it reason
-# so much it runs out of budget and returns NO content at all. Capping
-# reasoning effort to "low" (OpenRouter's `reasoning.effort` field) fixes
-# this - live-tested at ~90 reasoning tokens vs ~8000 (truncated, empty)
-# without the cap, for the same full-context prompt.
+# prompt (e.g. with RAG context + tool results attached) could make it
+# reason so much it ran out of budget and returned NO content at all.
+# Capping reasoning effort to "low" (OpenRouter's `reasoning.effort` field)
+# fixed this. nemotron-3-super-120b-a12b:free's docs list no fixed set of
+# supported effort levels (unlike z-ai/glm-5.2:free, which only documents
+# high/xhigh), so "low" is expected to be honored the same way - kept as
+# the default rather than assuming a change is needed.
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
 # Tried once, automatically, only if OPENROUTER_MODEL's call fails (see
 # call_openrouter() below) - the same free-tier-congestion failure mode
 # this file already documents on RateLimitError. Set to "" to disable
 # fallback entirely and only ever try OPENROUTER_MODEL.
-OPENROUTER_FALLBACK_MODEL = os.environ.get("OPENROUTER_FALLBACK_MODEL", "openai/gpt-oss-20b:free")
+OPENROUTER_FALLBACK_MODEL = os.environ.get("OPENROUTER_FALLBACK_MODEL", "google/gemma-4-31b-it:free")
 OPENROUTER_MAX_TOKENS = int(os.environ.get("ATHLETEOS_OPENROUTER_MAX_TOKENS", "3000"))
 OPENROUTER_EFFORT = os.environ.get("ATHLETEOS_OPENROUTER_EFFORT", "low")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
