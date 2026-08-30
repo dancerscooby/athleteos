@@ -139,7 +139,7 @@ class TestPromptAndContextReachTheProvider(unittest.TestCase):
             post.return_value = _fake_httpx_response(json_body=_chat_completion(json.dumps(FAKE_PLAN)))
             openrouter_provider(BASE_PROFILE)
 
-        self.assertEqual(post.call_args.kwargs["json"]["reasoning"], {"effort": "low"})
+        self.assertEqual(post.call_args.kwargs["json"]["reasoning"], {"effort": llm_provider.OPENROUTER_EFFORT})
 
 
 # ----------------------------------------------------------------------

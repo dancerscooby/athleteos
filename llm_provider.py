@@ -93,11 +93,16 @@ LLM_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 # (counted against max_tokens) before writing its actual answer, and a long
 # prompt (e.g. with RAG context + tool results attached) could make it
 # reason so much it ran out of budget and returned NO content at all.
-# Capping reasoning effort to "low" (OpenRouter's `reasoning.effort` field)
-# fixed this. nemotron-3-super-120b-a12b:free's docs list no fixed set of
-# supported effort levels (unlike z-ai/glm-5.2:free, which only documents
-# high/xhigh), so "low" is expected to be honored the same way - kept as
-# the default rather than assuming a change is needed.
+# "low" effort was assumed to fix this the same way it did for gpt-oss-20b,
+# but live-tested (2026-08-30) against nemotron-3-super-120b-a12b:free's
+# real /meal-plan prompt (RAG context + tool results included): OpenRouter
+# allocates reasoning as a PERCENTAGE of max_tokens for this model, and
+# "low" still spent ~49-50% of the budget on hidden reasoning regardless of
+# max_tokens (1480/3000, 2810/6000, 2972/6000 tokens) - not enough is left
+# for the visible JSON, which failed to parse every time. "none" disables
+# reasoning entirely for this model (confirmed live: reasoning_tokens=0)
+# and reliably produced a complete, valid meal-plan JSON using only
+# 1510/3000 tokens on the exact same real prompt - kept as the default.
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
 # Tried once, automatically, only if OPENROUTER_MODEL's call fails (see
@@ -106,7 +111,7 @@ OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "nvidia/nemotron-3-super-1
 # fallback entirely and only ever try OPENROUTER_MODEL.
 OPENROUTER_FALLBACK_MODEL = os.environ.get("OPENROUTER_FALLBACK_MODEL", "google/gemma-4-31b-it:free")
 OPENROUTER_MAX_TOKENS = int(os.environ.get("ATHLETEOS_OPENROUTER_MAX_TOKENS", "3000"))
-OPENROUTER_EFFORT = os.environ.get("ATHLETEOS_OPENROUTER_EFFORT", "low")
+OPENROUTER_EFFORT = os.environ.get("ATHLETEOS_OPENROUTER_EFFORT", "none")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 
