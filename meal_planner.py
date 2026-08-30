@@ -288,11 +288,15 @@ Return ONLY valid JSON in exactly this shape:
       "ingredients": [{{"item": "<string>", "quantity": "<string>"}}],
       "calories": <int>, "protein_g": <int>, "carbs_g": <int>, "fats_g": <int>,
       "reasoning": "<why this meal for this athlete>",
-      "resources": [{{"type": "youtube", "title": "<string>", "url": "<string>"}}]
+      "resources": [{{"type": "youtube", "title": "<string>", "url": "<string>", "item": "<string>"}}]
     }}
   ],
   "disclaimer": "<string>"
 }}
+Each resource's "item" must be an EXACT match of one of that same meal's
+ingredient "item" names above - it says which ingredient the recipe link is
+for, so do not invent a new name or use a dish name that isn't also an
+ingredient.
 Lower the confidence_score when important inputs (budget, allergies, training
 intensity) are missing or unclear, and say so in confidence_reason.
 For "disclaimer", use exactly this text:

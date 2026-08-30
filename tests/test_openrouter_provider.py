@@ -301,5 +301,31 @@ class TestProviderSwitching(unittest.TestCase):
                 generate_meal_plan(dict(BASE_PROFILE))
 
 
+# ----------------------------------------------------------------------
+# 8. resources[].item contract (prompt text + Claude's structured-output
+#    schema) - api.py's Resource model requires "item" (the frontend keys a
+#    lookup table by it to attach each recipe link to the right ingredient
+#    row), but neither the LLM-facing prompt nor MEAL_PLAN_SCHEMA used to
+#    ask for it, so an LLM-generated plan with resources always failed
+#    FastAPI's response validation. These tests guard the fix.
+# ----------------------------------------------------------------------
+
+class TestResourceItemContract(unittest.TestCase):
+    def test_prompt_instructs_resources_to_include_item(self):
+        prompt = build_prompt(BASE_PROFILE)
+        self.assertIn('"item": "<string>"', prompt)
+        self.assertIn("EXACT match", prompt)
+
+    def test_meal_plan_schema_requires_item_in_resources(self):
+        resource_schema = llm_provider.MEAL_PLAN_SCHEMA["properties"]["meals"]["items"]["properties"]["resources"]["items"]
+        self.assertIn("item", resource_schema["properties"])
+        self.assertEqual(resource_schema["properties"]["item"], {"type": "string"})
+        self.assertIn("item", resource_schema["required"])
+        # additionalProperties: False must stay - this is what makes Claude's
+        # structured output actually honor the schema instead of just the
+        # (unenforceable for Claude) prompt text.
+        self.assertFalse(resource_schema["additionalProperties"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
