@@ -299,7 +299,36 @@ def create_meal_plan(request: MealPlanRequest):
     # HOW MANY days to generate, not anything about the athlete.
     duration_days = payload.pop("duration_days")
     profile = payload                                # validated model -> the profile dict
-    trace = run_with_trace(profile, athlete_id, days=duration_days)  # Agent v1: memory + RAG + tools + generation
+    try:
+        trace = run_with_trace(profile, athlete_id, days=duration_days)  # Agent v1: memory + RAG + tools + generation
+    except RateLimitError as exc:
+        # Same external capacity limit /chat already handles this way (see
+        # that handler and llm_provider.RateLimitError's docstring): the
+        # free-tier model sits behind a shared, oversubscribed pool, so a
+        # 429 is not a bug in this request. Told apart from the generic
+        # branch below so the athlete gets an honest, specific reason. No
+        # retry here on purpose - retrying an already-oversubscribed pool
+        # would only add to the congestion.
+        logger.warning("meal-plan: OpenRouter rate limit hit for athlete_id=%r: %s", athlete_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="AthleteOS is temporarily busy. Please try again in a moment.",
+        ) from exc
+    except LLMProviderError as exc:
+        # Anything else the provider layer raises (missing API key, network
+        # failure, an upstream timeout, a response that wouldn't parse as
+        # JSON). Before this, such a failure escaped uncaught and FastAPI
+        # returned a plain-text 500 "Internal Server Error" - opaque to the
+        # athlete AND to debugging, since the body carried no information at
+        # all. The real cause is logged server-side; the raw exception text
+        # is never sent to the athlete, exactly as /chat already does, since
+        # it can carry internal identifiers (env var names, provider error
+        # payloads).
+        logger.error("meal-plan: LLM provider failed for athlete_id=%r: %s", athlete_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Meal plan generation isn't available right now. Please try again in a moment.",
+        ) from exc
     update_memory_from_profile(trace["merged_profile"], athlete_id)  # remember this athlete's latest info
     # Episodic memory's schema (episodic_memory.create_episode) reads a
     # single day_summary/meals shape - exactly what a duration_days=1 plan
