@@ -917,8 +917,27 @@
         });
 
         if (!response.ok) {
-          const err = await response.json();
-          showErrors(err);
+          // The server was reached but returned an error - the body is
+          // USUALLY JSON (FastAPI's validation errors, or a handled
+          // HTTPException), but an unhandled server-side exception (e.g. an
+          // LLM provider failure with no try/except around it) returns a
+          // plain-text body like "Internal Server Error" instead. Without
+          // this guard, response.json() throws on that plain text, which
+          // was being caught by the outer catch below and shown as the
+          // misleading "couldn't reach the server" message - even though
+          // the server responded just fine, it just failed to generate a
+          // plan.
+          let err = null;
+          try {
+            err = await response.json();
+          } catch (parseError) {
+            err = null;
+          }
+          if (err) {
+            showErrors(err);
+          } else {
+            showMessage("Meal plan generation failed. Please try again.");
+          }
           return;
         }
         const result = await response.json();
@@ -991,6 +1010,14 @@
     // outline the specific offending fields so the athlete doesn't have to
     // match each line back to a field by reading the whole form.
     function showErrors(err) {
+      // A handled server-side error (e.g. a raised HTTPException) often
+      // sends {"detail": "<message>"} as a plain string rather than
+      // FastAPI's structured validation-error array - show that message
+      // directly instead of falling through to the generic one below.
+      if (typeof err.detail === "string") {
+        showMessage(err.detail);
+        return;
+      }
       if (!Array.isArray(err.detail)) {
         showMessage("Something went wrong with your request. Please check your inputs and try again.");
         return;
