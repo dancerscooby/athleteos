@@ -1716,10 +1716,11 @@ def generate_meal_plan(profile, agent_context=None, days=1):
     caller that only passes `profile` (the CLI below, tests, direct calls)
     behaves EXACTLY as before. When orchestrator.py supplies it, it carries
     RAG/tool results the orchestrator already computed - mock_provider(),
-    llm_provider.claude_provider(), and llm_provider.openrouter_provider()
-    each know how to use it (see each function's own docstring for what it
-    does with it); with agent_context=None (the default), all three behave
-    exactly as they did before agent_context existed.
+    llm_provider.claude_provider(), llm_provider.openrouter_provider(), and
+    llm_provider.groq_provider() each know how to use it (see each
+    function's own docstring for what it does with it); with
+    agent_context=None (the default), they all behave exactly as they did
+    before agent_context existed.
 
     `days` (optional, default 1 - Step 6/multi-day planning) is likewise
     additive: with days=1 this function takes EXACTLY the code path it
@@ -1747,6 +1748,12 @@ def generate_meal_plan(profile, agent_context=None, days=1):
             # Same lazy-import reasoning as the "claude" branch above.
             from llm_provider import openrouter_provider
             return openrouter_provider(profile, agent_context)
+        if PROVIDER == "groq":
+            # Same lazy-import reasoning as the branches above. Groq is an
+            # additional free provider under evaluation; OpenRouter remains
+            # the production default unless ATHLETEOS_PROVIDER says "groq".
+            from llm_provider import groq_provider
+            return groq_provider(profile, agent_context)
         raise ValueError(f"Unknown provider: {PROVIDER!r}")
 
     if PROVIDER == "mock":

@@ -114,6 +114,40 @@ OPENROUTER_MAX_TOKENS = int(os.environ.get("ATHLETEOS_OPENROUTER_MAX_TOKENS", "3
 OPENROUTER_EFFORT = os.environ.get("ATHLETEOS_OPENROUTER_EFFORT", "none")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
+# Groq (groq_provider) - a third provider, evaluated as an alternative free
+# inference backend. Added ADDITIVELY: nothing above this block changes, and
+# OpenRouter stays the production provider until ATHLETEOS_PROVIDER is
+# explicitly switched to "groq".
+#
+# Why it was worth evaluating: OpenRouter's free tier allows 50 requests/day
+# and its shared pool is oversubscribed enough that real production runs
+# started failing after ~2 generations (see RateLimitError above). Groq's
+# free tier for openai/gpt-oss-20b is documented at 30 RPM / 1,000 RPD /
+# 8,000 TPM / 200,000 TPD - a 20x higher daily request ceiling.
+#
+# Groq exposes an OpenAI-compatible chat-completions endpoint, so the
+# request/response handling below is the same shape _call_openrouter_once()
+# already uses. Two deliberate differences:
+#   - max_completion_tokens instead of max_tokens: OpenAI deprecated
+#     max_tokens for reasoning models and Groq follows that naming.
+#   - response_format uses a real json_schema (not just json_object).
+#     openai/gpt-oss-20b is on Groq's list of models supporting
+#     json_schema with strict=true, and MEAL_PLAN_SCHEMA already satisfies
+#     strict mode's requirements at every level (every object lists all of
+#     its properties in "required" and sets additionalProperties: false),
+#     so the schema is passed through UNCHANGED - this is stronger than
+#     the prompt-only JSON the OpenRouter path has to rely on.
+#
+# gpt-oss-20b is a reasoning model whose hidden reasoning tokens count
+# against the completion budget (the same failure mode documented for
+# OpenRouter above). Unlike OpenRouter, Groq does NOT accept effort "none"
+# for gpt-oss - only low/medium/high - so "low" is the default here.
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+GROQ_MAX_TOKENS = int(os.environ.get("ATHLETEOS_GROQ_MAX_TOKENS", "3000"))
+GROQ_REASONING_EFFORT = os.environ.get("ATHLETEOS_GROQ_REASONING_EFFORT", "low")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+
 
 class LLMProviderError(Exception):
     """Raised for any failure while getting a plan from an LLM provider (Claude or OpenRouter)."""
@@ -758,3 +792,138 @@ def openrouter_provider_multi_day(profile, days, agent_context=None):
         "days": batch1["days"] + batch2["days"],
         "disclaimer": batch1["disclaimer"],
     }
+
+
+# ----------------------------------------------------------------------
+# Groq provider (free-tier, OpenAI-compatible, schema-enforced JSON)
+# ----------------------------------------------------------------------
+# Entirely additive: openrouter_provider() and claude_provider() above are
+# untouched, and nothing here runs unless ATHLETEOS_PROVIDER=groq. See the
+# GROQ_* configuration block near the top of this file for why Groq was
+# evaluated and how its API differs from OpenRouter's.
+
+def _groq_response_format():
+    """
+    Groq's schema-enforced structured-output payload, built from the
+    EXISTING MEAL_PLAN_SCHEMA - the schema itself is not modified or
+    duplicated here. strict=true is safe because every object in that
+    schema already lists all of its properties in "required" and sets
+    additionalProperties: false, which is exactly what strict mode
+    requires.
+    """
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "meal_plan",
+            "strict": True,
+            "schema": MEAL_PLAN_SCHEMA,
+        },
+    }
+
+
+def call_groq(messages, response_format=None, max_tokens=None):
+    """
+    Low-level Groq chat-completion call - the Groq equivalent of
+    call_openrouter(), with the same contract: returns the raw text content
+    of the model's first choice, and raises LLMProviderError (or its
+    RateLimitError subclass for HTTP 429) on any failure.
+
+    There is deliberately no primary/fallback model pair here. OpenRouter
+    needed one because its free slugs rotate and disappear; this is a
+    single-model evaluation of openai/gpt-oss-20b, and adding an untested
+    second model would be guesswork.
+    """
+    if not GROQ_API_KEY:
+        raise LLMProviderError(
+            "No API key configured. Set GROQ_API_KEY to use the Groq provider."
+        )
+
+    try:
+        import httpx
+    except ImportError as exc:
+        raise LLMProviderError(
+            "The 'httpx' package is not installed. Run: python3 -m pip install httpx"
+        ) from exc
+
+    payload = {
+        "model": GROQ_MODEL,
+        "max_completion_tokens": max_tokens if max_tokens is not None else GROQ_MAX_TOKENS,
+        "reasoning_effort": GROQ_REASONING_EFFORT,
+        "messages": messages,
+    }
+    if response_format is not None:
+        payload["response_format"] = response_format
+
+    try:
+        response = httpx.post(
+            GROQ_API_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=60.0,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            raise RateLimitError(f"Groq rate limit hit: {exc}") from exc
+        raise LLMProviderError(f"Groq request failed: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise LLMProviderError(f"Groq request failed: {exc}") from exc
+
+    data = response.json()
+
+    if "error" in data:
+        raise LLMProviderError(f"Groq returned an error: {data['error']}")
+
+    choices = data.get("choices") or []
+    if not choices:
+        raise LLMProviderError("Groq returned no choices in its response.")
+
+    text = choices[0].get("message", {}).get("content")
+    if not text:
+        raise LLMProviderError("Groq's response contained no text content.")
+
+    return text
+
+
+def groq_provider(profile, agent_context=None):
+    """
+    Get a meal plan from Groq. Identical contract to mock_provider() /
+    claude_provider() / openrouter_provider(): same input, same output
+    shape, raises LLMProviderError on any failure instead of crashing.
+
+    Like openrouter_provider() (and unlike claude_provider()), this has NO
+    standalone mode - it never retrieves RAG context and never runs tools
+    itself. That is not a limitation for the production flow: the agent's
+    tool loop is deterministic and lives in orchestrator.run_with_trace(),
+    which decides and executes the tools in Python BEFORE calling any
+    provider and passes the results down in agent_context. So the existing
+    agent/tool loop works with this provider unchanged.
+    """
+    base_prompt = build_prompt(profile)  # reuse existing prompt logic - no duplication
+    rag_context = (agent_context or {}).get("rag_context") or ""
+    tool_results = (agent_context or {}).get("tool_results") or {}
+    personal_recipes = (agent_context or {}).get("personal_recipes") or []
+    recipes_context = _format_recipes(personal_recipes, profile) if personal_recipes else None
+    prompt = _compose_prompt(base_prompt, rag_context, tool_results, recipes_context)
+
+    logger.info(
+        "groq_provider: model=%s, prompt length=%d characters, tool_results=%s",
+        GROQ_MODEL, len(prompt), list(tool_results),
+    )
+
+    text = call_groq(
+        messages=[{"role": "user", "content": prompt}],
+        response_format=_groq_response_format(),
+    )
+
+    try:
+        plan = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise LLMProviderError(f"Could not parse the model's JSON: {exc}") from exc
+
+    _validate_plan_shape(plan)
+
+    return plan
