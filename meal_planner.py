@@ -22,9 +22,10 @@ else.
 import hashlib
 import json
 import os
+import re
 
 from regional_foods import REGIONS, SAFE_VEG_PROTEIN, detect_region
-from recipe_links import get_recipe_resource
+from recipe_links import _search_url, get_recipe_resource
 from nutrition_data import get_nutrition_info
 from tools.ingredients_tool import NON_VEGETARIAN
 
@@ -1708,6 +1709,91 @@ PROVIDER = os.environ.get("ATHLETEOS_PROVIDER", "mock")
 DEBUG = False       # set True to print internal signals while testing (never affects the JSON)
 
 
+# ----------------------------------------------------------------------
+# Deterministic recipe URLs (shared post-processing)
+# ----------------------------------------------------------------------
+# Every LLM provider is asked for a "resources" list containing a "url",
+# and nothing in the prompt, MEAL_PLAN_SCHEMA, or api.Resource constrains
+# what that string may be - so models fabricate specific video pages that
+# look plausible and are dead. Verified in production: 7/7 fabricated
+# links from a Groq plan and 9/9 from an earlier OpenRouter plan resolved
+# to "Video unavailable". This is provider-independent.
+#
+# mock_provider never had the problem because it builds resources from
+# recipe_links.get_recipe_resource(), whose URLs are YouTube SEARCH
+# queries - "never a fabricated specific page", as that module puts it.
+# The fix gives every provider the same guarantee by rebuilding the URL
+# from the dish name with the same builder, AFTER generation, instead of
+# trusting whatever the model wrote.
+#
+# Deliberately NOT done via recipe_links.COMPLEX_DISHES: that registry is
+# keyed on exact strings from regional_foods.py, and LLMs invent their own
+# ("Chole (chickpea curry)" rather than "Chole"). Measured against a real
+# Groq plan, an exact registry lookup matched 0 of 17 ingredient names,
+# even after normalising case and hyphens. _search_url() needs no registry
+# and works on any dish name, which is why it is the mechanism here.
+
+
+def _normalize_dish_name(name):
+    """
+    Loose comparison key for matching a resource to the ingredient it
+    belongs to: lowercased, parenthetical asides removed, whitespace
+    collapsed. So "Chole (chickpea curry)" and "Chole" both key to
+    "chole", and "Palak (spinach) sabzi" matches "Palak sabzi".
+
+    Used ONLY for matching. The URL itself still comes from _search_url(),
+    which has its own (different, and deliberately unchanged) normalisation.
+    """
+    return re.sub(r"\s+", " ", re.sub(r"\([^)]*\)", " ", name)).strip().lower()
+
+
+def _apply_deterministic_recipe_urls_to_meal(meal):
+    """
+    Rewrite one meal's resources in place: point each resource at the
+    ingredient it actually belongs to, then replace its URL with a real
+    search URL derived from that dish name.
+
+    The "item" repair exists because the frontend looks resources up by
+    EXACT ingredient string (see index.html's resourceByItem), so a model
+    writing "Chole" for an ingredient listed as "Chole (chickpea curry)"
+    silently loses the link. A resource naming something that is not an
+    ingredient of this meal is left as-is - its URL is still made real,
+    but nothing is invented to make it match.
+
+    Only "url" and "item" are touched; "type" and "title" are the model's
+    to keep, and no resource is ever added or removed.
+    """
+    by_key = {}
+    for ingredient in meal.get("ingredients") or []:
+        item = ingredient.get("item")
+        if item and _normalize_dish_name(item) not in by_key:
+            by_key[_normalize_dish_name(item)] = item
+
+    for resource in meal.get("resources") or []:
+        item = resource.get("item")
+        if not item:
+            continue
+        matched = by_key.get(_normalize_dish_name(item))
+        if matched:
+            resource["item"] = matched
+        resource["url"] = _search_url(resource["item"])
+
+
+def apply_deterministic_recipe_urls(plan):
+    """
+    Apply the rewrite above to every meal of a plan, in place, and return
+    it. Handles both shapes this module produces: a 1-day plan (top-level
+    "meals") and a multi-day plan ("days", each with its own "meals").
+
+    Idempotent, and a no-op for mock_provider, whose resources already
+    hold exactly these URLs and already name their ingredients exactly.
+    """
+    for day in plan.get("days") or [plan]:
+        for meal in day.get("meals") or []:
+            _apply_deterministic_recipe_urls_to_meal(meal)
+    return plan
+
+
 def generate_meal_plan(profile, agent_context=None, days=1):
     """
     The one function the rest of the app will ever call to get a plan.
@@ -1733,6 +1819,24 @@ def generate_meal_plan(profile, agent_context=None, days=1):
     days=7 specifically, the only value the batching approach was validated
     against). Requesting an unimplemented days/provider combination raises
     NotImplementedError rather than silently ignoring `days`.
+
+    Every successfully generated plan passes through
+    apply_deterministic_recipe_urls() before being returned, so recipe
+    links are real for EVERY provider and for both the 1-day and
+    multi-day shapes. Wrapping the dispatch here (rather than editing
+    each provider) is what makes that a single shared guarantee instead
+    of four copies that can drift apart.
+    """
+    return apply_deterministic_recipe_urls(
+        _dispatch_provider(profile, agent_context, days)
+    )
+
+
+def _dispatch_provider(profile, agent_context, days):
+    """
+    Pick and call the configured provider - the dispatch that used to be
+    the whole body of generate_meal_plan(), unchanged. Split out only so
+    the post-processing above applies to every return path at once.
     """
     if days == 1:
         if PROVIDER == "mock":
