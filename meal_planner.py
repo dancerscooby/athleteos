@@ -1794,6 +1794,72 @@ def apply_deterministic_recipe_urls(plan):
     return plan
 
 
+# ----------------------------------------------------------------------
+# Deterministic day_summary totals (shared post-processing)
+# ----------------------------------------------------------------------
+# day_summary is meant to be a SUMMARY of the day's meals - that is what
+# _day_summary() computes for mock_provider, by summing them. On the LLM
+# providers nothing computed it and nothing checked it, so the model wrote
+# it freehand: measured against two real Groq production plans it copied
+# the nutrition_tool TARGETS into day_summary while its per-meal numbers
+# went their own way, leaving the two up to 29% apart (protein +23.1% /
+# -19.2%, carbs -24.5% / -29.3%). The athlete then read a correct-looking
+# daily protein figure while the food listed delivered a quarter less.
+#
+# Given the identical tool numbers, mock_provider's deterministic path is
+# exact on every macro - so this is arithmetic the application already
+# knows how to do, handed to the model by accident rather than by design.
+# Recomputing the totals here makes the identity hold for every provider.
+#
+# Deliberately NOT done: rescaling the meals to hit the tool target. The
+# meal-level values stay exactly as generated; only the totals that claim
+# to describe them are corrected. That does mean a plan whose food misses
+# the target now SHOWS it missing the target instead of reporting the
+# target back - the inaccuracy is surfaced, not introduced.
+#
+# "notes" is left untouched (it is the model's prose, and rewriting it is
+# a separate decision), as are day/meal ordering and every other field.
+
+
+_DAY_SUMMARY_TOTALS = (
+    ("total_calories", "calories"),
+    ("total_protein_g", "protein_g"),
+    ("total_carbs_g", "carbs_g"),
+    ("total_fats_g", "fats_g"),
+)
+
+
+def _recompute_day_summary_totals(day):
+    """
+    Overwrite one day's four day_summary totals with the sum of its meals,
+    in place. Missing meal values count as 0 rather than raising, matching
+    how the rest of this post-processing treats partial model output; a day
+    with no day_summary at all is left alone, since there is nothing to
+    correct and inventing one would change the plan's shape.
+    """
+    day_summary = day.get("day_summary")
+    if not isinstance(day_summary, dict):
+        return
+    meals = day.get("meals") or []
+    for total_key, meal_key in _DAY_SUMMARY_TOTALS:
+        day_summary[total_key] = sum(meal.get(meal_key) or 0 for meal in meals)
+
+
+def apply_deterministic_day_summary(plan):
+    """
+    Recompute every day's day_summary totals from that day's meals, in
+    place, and return the plan. Handles both shapes this module produces
+    (1-day "meals", multi-day "days"), exactly like
+    apply_deterministic_recipe_urls() above.
+
+    Idempotent, and a no-op for mock_provider, whose _day_summary() already
+    computes these totals as the same sum.
+    """
+    for day in plan.get("days") or [plan]:
+        _recompute_day_summary_totals(day)
+    return plan
+
+
 def generate_meal_plan(profile, agent_context=None, days=1):
     """
     The one function the rest of the app will ever call to get a plan.
@@ -1820,16 +1886,18 @@ def generate_meal_plan(profile, agent_context=None, days=1):
     against). Requesting an unimplemented days/provider combination raises
     NotImplementedError rather than silently ignoring `days`.
 
-    Every successfully generated plan passes through
-    apply_deterministic_recipe_urls() before being returned, so recipe
-    links are real for EVERY provider and for both the 1-day and
-    multi-day shapes. Wrapping the dispatch here (rather than editing
-    each provider) is what makes that a single shared guarantee instead
-    of four copies that can drift apart.
+    Every successfully generated plan passes through the deterministic
+    post-processing steps before being returned - real recipe URLs, and
+    day_summary totals that actually equal the day's meals - so both hold
+    for EVERY provider and for both the 1-day and multi-day shapes.
+    Wrapping the dispatch here (rather than editing each provider) is what
+    makes those single shared guarantees instead of four copies that can
+    drift apart.
     """
-    return apply_deterministic_recipe_urls(
-        _dispatch_provider(profile, agent_context, days)
-    )
+    plan = _dispatch_provider(profile, agent_context, days)
+    plan = apply_deterministic_recipe_urls(plan)
+    plan = apply_deterministic_day_summary(plan)
+    return plan
 
 
 def _dispatch_provider(profile, agent_context, days):
