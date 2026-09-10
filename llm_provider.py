@@ -47,6 +47,7 @@ such mode (see its own docstring for why).
 import json
 import logging
 import os
+import re
 
 from dotenv import load_dotenv
 
@@ -149,8 +150,137 @@ GROQ_REASONING_EFFORT = os.environ.get("ATHLETEOS_GROQ_REASONING_EFFORT", "low")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 
+# Failure categories carried on LLMProviderError for server-side logging.
+# Purely diagnostic: they never reach the athlete (api.py maps every one of
+# them to the same safe 503 text) and they do not change control flow.
+#
+# Why they exist: the generic "except LLMProviderError" branch conflated an
+# upstream 502/504, a connection failure, a read timeout, a 200 response
+# whose body was an error object, and a body that would not parse as JSON.
+# Diagnosing a real production 503 twice required querying the database to
+# work out how far the request had got, because the log line said only
+# "LLM provider failed". These make the log line say which one it was.
+CATEGORY_MISSING_API_KEY = "missing_api_key"
+CATEGORY_MISSING_DEPENDENCY = "missing_dependency"
+CATEGORY_RATE_LIMIT = "rate_limit"              # HTTP 429
+CATEGORY_HTTP_STATUS = "http_status"            # any other non-2xx (502/504/401/404...)
+CATEGORY_TIMEOUT = "timeout"                    # connect/read/write timeout
+CATEGORY_NETWORK = "network"                    # DNS, connection refused, TLS...
+CATEGORY_API_ERROR = "api_error"                # HTTP 200 carrying an "error" object
+CATEGORY_EMPTY_RESPONSE = "empty_response"      # no choices, or no text content
+CATEGORY_INVALID_JSON = "invalid_json"          # content was not parseable JSON
+CATEGORY_SCHEMA_MISMATCH = "schema_mismatch"    # parsed, but missing required fields
+CATEGORY_REFUSAL = "refusal"                    # model declined to answer
+CATEGORY_SDK_ERROR = "sdk_error"                # Anthropic SDK raised
+
+
+# Anything matching these is replaced before a diagnostic string is logged.
+# The exception text we build already avoids headers, but a provider's own
+# error payload is arbitrary text we did not write - so it is scrubbed
+# rather than trusted. Ordered longest-prefix-first so "sk-or-v1-" wins
+# over a bare "sk-".
+_SECRET_PATTERNS = [
+    re.compile(r"Bearer\s+\S+", re.IGNORECASE),
+    re.compile(r"sk-or-v1-[A-Za-z0-9._-]+"),
+    re.compile(r"sk-ant-[A-Za-z0-9._-]+"),
+    re.compile(r"gsk_[A-Za-z0-9._-]+"),
+    re.compile(r"sk-[A-Za-z0-9._-]{16,}"),
+]
+
+_MAX_DIAGNOSTIC_CHARS = 300
+
+
+def sanitize_for_log(text):
+    """
+    Redact anything key-shaped from `text` and cap its length, for a string
+    that is about to be logged. Defence in depth: nothing here is supposed
+    to contain a credential in the first place, but provider error payloads
+    and response bodies are text we did not author.
+    """
+    if text is None:
+        return None
+    text = str(text)
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    if len(text) > _MAX_DIAGNOSTIC_CHARS:
+        text = text[:_MAX_DIAGNOSTIC_CHARS] + "...[truncated]"
+    return text
+
+
+def format_provider_error(exc):
+    """
+    One-line, log-safe description of a provider failure, for api.py's
+    handlers. Names the provider, the failure category and the HTTP status
+    where there was one, then the sanitised message and diagnostic detail.
+
+    Everything here is safe to log: the message is text this module wrote,
+    and `detail` was scrubbed by sanitize_for_log() when the exception was
+    constructed and is scrubbed again here for anything raised elsewhere.
+    Nothing this returns is ever sent to a user - api.py logs it and
+    replies with its own fixed 503 text.
+
+    An LLMProviderError raised without the optional fields (older code, a
+    test, or a caller that did not classify) still formats cleanly, with
+    "unknown" standing in.
+    """
+    provider = getattr(exc, "provider", None) or "unknown"
+    category = getattr(exc, "category", None) or "unknown"
+    status_code = getattr(exc, "status_code", None)
+    detail = getattr(exc, "detail", None)
+
+    parts = [f"provider={provider}", f"category={category}"]
+    if status_code is not None:
+        parts.append(f"status={status_code}")
+    parts.append(f"error={sanitize_for_log(exc)!r}")
+    if detail:
+        parts.append(f"detail={sanitize_for_log(detail)!r}")
+    return " ".join(parts)
+
+
+def _response_snippet(response):
+    """
+    A short, sanitised excerpt of a provider's error response body, for the
+    log line only. Never returned to a caller and never sent to a user;
+    sanitize_for_log() scrubs it again inside LLMProviderError anyway.
+    """
+    try:
+        return response.text
+    except Exception:            # a mocked or already-closed response
+        return None
+
+
 class LLMProviderError(Exception):
-    """Raised for any failure while getting a plan from an LLM provider (Claude or OpenRouter)."""
+    """
+    Raised for any failure while getting a plan from an LLM provider
+    (Claude, OpenRouter or Groq).
+
+    `provider`, `category`, `status_code` and `detail` are all OPTIONAL and
+    default to None, so every existing `LLMProviderError("some message")`
+    construction and every existing `except LLMProviderError` handler keeps
+    working byte-identically - str(exc) is still just the message. They
+    exist so api.py can log WHICH kind of failure happened without changing
+    what the athlete sees; see the CATEGORY_* constants above.
+
+    `detail` is passed through sanitize_for_log() on the way in, because it
+    is where provider-authored text (an error payload, an unparseable body)
+    ends up.
+    """
+
+    def __init__(self, message, provider=None, category=None, status_code=None, detail=None):
+        super().__init__(message)
+        self.provider = provider
+        self.category = category
+        self.status_code = status_code
+        self.detail = sanitize_for_log(detail)
+
+    def log_context(self):
+        """The diagnostic fields as a dict, for structured logging in api.py."""
+        return {
+            "provider": self.provider,
+            "category": self.category,
+            "status_code": self.status_code,
+            "detail": self.detail,
+        }
 
 
 class RateLimitError(LLMProviderError):
@@ -406,7 +536,10 @@ def _validate_plan_shape(plan):
     """Raise LLMProviderError if a parsed model response is missing required keys."""
     missing = [k for k in MEAL_PLAN_SCHEMA["required"] if k not in plan]
     if missing:
-        raise LLMProviderError(f"Model response missing required fields: {missing}")
+        raise LLMProviderError(
+            f"Model response missing required fields: {missing}",
+            category=CATEGORY_SCHEMA_MISMATCH, detail=f"missing={missing}",
+        )
 
 
 def claude_provider(profile, agent_context=None):
@@ -418,14 +551,16 @@ def claude_provider(profile, agent_context=None):
     """
     if not LLM_API_KEY:
         raise LLMProviderError(
-            "No API key configured. Set ANTHROPIC_API_KEY to use the LLM provider."
+            "No API key configured. Set ANTHROPIC_API_KEY to use the LLM provider.",
+            provider="claude", category=CATEGORY_MISSING_API_KEY,
         )
 
     try:
         import anthropic
     except ImportError as exc:
         raise LLMProviderError(
-            "The 'anthropic' package is not installed. Run: python3 -m pip install anthropic"
+            "The 'anthropic' package is not installed. Run: python3 -m pip install anthropic",
+            provider="claude", category=CATEGORY_MISSING_DEPENDENCY,
         ) from exc
 
     base_prompt = build_prompt(profile)  # reuse existing prompt logic - no duplication
@@ -480,21 +615,35 @@ def claude_provider(profile, agent_context=None):
             # schema above) still governs its final answer either way.
             response = run_with_tools(client=client, **request_kwargs)
     except Exception as exc:  # network error, auth error, bad request, etc.
-        raise LLMProviderError(f"LLM request failed: {exc}") from exc
+        raise LLMProviderError(
+            f"LLM request failed: {exc}",
+            provider="claude", category=CATEGORY_SDK_ERROR, detail=type(exc).__name__,
+        ) from exc
 
     # A safety classifier may decline the request (HTTP 200, no usable content).
     if response.stop_reason == "refusal":
-        raise LLMProviderError("The model declined to answer this request.")
+        raise LLMProviderError(
+            "The model declined to answer this request.",
+            provider="claude", category=CATEGORY_REFUSAL,
+        )
 
     # With structured output the first text block is guaranteed-valid JSON.
     text = next((b.text for b in response.content if b.type == "text"), None)
     if text is None:
-        raise LLMProviderError("The model returned no text content.")
+        raise LLMProviderError(
+            "The model returned no text content.",
+            provider="claude", category=CATEGORY_EMPTY_RESPONSE,
+            detail=f"stop_reason={getattr(response, 'stop_reason', None)!r}",
+        )
 
     try:
         plan = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise LLMProviderError(f"Could not parse the model's JSON: {exc}") from exc
+        raise LLMProviderError(
+            f"Could not parse the model's JSON: {exc}",
+            provider="claude", category=CATEGORY_INVALID_JSON,
+            detail=f"{exc}; response_chars={len(text)}",
+        ) from exc
 
     # Cheap sanity check that the shape matches our contract.
     _validate_plan_shape(plan)
@@ -522,7 +671,8 @@ def _call_openrouter_once(messages, response_format, model, max_tokens=None):
         import httpx
     except ImportError as exc:
         raise LLMProviderError(
-            "The 'httpx' package is not installed. Run: python3 -m pip install httpx"
+            "The 'httpx' package is not installed. Run: python3 -m pip install httpx",
+            provider="openrouter", category=CATEGORY_MISSING_DEPENDENCY,
         ) from exc
 
     payload = {
@@ -546,24 +696,56 @@ def _call_openrouter_once(messages, response_format, model, max_tokens=None):
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 429:
-            raise RateLimitError(f"OpenRouter rate limit hit: {exc}") from exc
-        raise LLMProviderError(f"OpenRouter request failed: {exc}") from exc
+        status = exc.response.status_code
+        if status == 429:
+            raise RateLimitError(
+                f"OpenRouter rate limit hit: {exc}",
+                provider="openrouter", category=CATEGORY_RATE_LIMIT, status_code=status,
+                detail=_response_snippet(exc.response),
+            ) from exc
+        raise LLMProviderError(
+            f"OpenRouter request failed: {exc}",
+            provider="openrouter", category=CATEGORY_HTTP_STATUS, status_code=status,
+            detail=_response_snippet(exc.response),
+        ) from exc
+    except httpx.TimeoutException as exc:
+        # This is the branch the free-tier "Upstream idle timeout exceeded"
+        # failures land in - previously logged identically to a DNS failure.
+        raise LLMProviderError(
+            f"OpenRouter request failed: {exc}",
+            provider="openrouter", category=CATEGORY_TIMEOUT, detail=type(exc).__name__,
+        ) from exc
     except httpx.HTTPError as exc:
-        raise LLMProviderError(f"OpenRouter request failed: {exc}") from exc
+        raise LLMProviderError(
+            f"OpenRouter request failed: {exc}",
+            provider="openrouter", category=CATEGORY_NETWORK, detail=type(exc).__name__,
+        ) from exc
 
     data = response.json()
 
     if "error" in data:
-        raise LLMProviderError(f"OpenRouter returned an error: {data['error']}")
+        raise LLMProviderError(
+            f"OpenRouter returned an error: {data['error']}",
+            provider="openrouter", category=CATEGORY_API_ERROR,
+            status_code=response.status_code, detail=str(data["error"]),
+        )
 
     choices = data.get("choices") or []
     if not choices:
-        raise LLMProviderError("OpenRouter returned no choices in its response.")
+        raise LLMProviderError(
+            "OpenRouter returned no choices in its response.",
+            provider="openrouter", category=CATEGORY_EMPTY_RESPONSE,
+            status_code=response.status_code, detail="no choices in response",
+        )
 
     text = choices[0].get("message", {}).get("content")
     if not text:
-        raise LLMProviderError("OpenRouter's response contained no text content.")
+        raise LLMProviderError(
+            "OpenRouter's response contained no text content.",
+            provider="openrouter", category=CATEGORY_EMPTY_RESPONSE,
+            status_code=response.status_code,
+            detail=f"finish_reason={choices[0].get('finish_reason')!r}, empty content",
+        )
 
     return text
 
@@ -597,7 +779,8 @@ def call_openrouter(messages, response_format=None, max_tokens=None):
     """
     if not OPENROUTER_API_KEY:
         raise LLMProviderError(
-            "No API key configured. Set OPENROUTER_API_KEY to use the OpenRouter provider."
+            "No API key configured. Set OPENROUTER_API_KEY to use the OpenRouter provider.",
+            provider="openrouter", category=CATEGORY_MISSING_API_KEY,
         )
 
     try:
@@ -656,7 +839,11 @@ def openrouter_provider(profile, agent_context=None):
     try:
         plan = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise LLMProviderError(f"Could not parse the model's JSON: {exc}") from exc
+        raise LLMProviderError(
+            f"Could not parse the model's JSON: {exc}",
+            provider="openrouter", category=CATEGORY_INVALID_JSON,
+            detail=f"{exc}; response_chars={len(text)}; tail={text[-120:]!r}",
+        ) from exc
 
     _validate_plan_shape(plan)
 
@@ -692,13 +879,22 @@ def _validate_batch_shape(batch):
     required = ["confidence_score", "confidence_reason", "days", "disclaimer"]
     missing = [k for k in required if k not in batch]
     if missing:
-        raise LLMProviderError(f"Model batch response missing required fields: {missing}")
+        raise LLMProviderError(
+            f"Model batch response missing required fields: {missing}",
+            category=CATEGORY_SCHEMA_MISMATCH, detail=f"missing={missing}",
+        )
     if not isinstance(batch["days"], list) or not batch["days"]:
-        raise LLMProviderError("Model batch response's 'days' must be a non-empty list.")
+        raise LLMProviderError(
+            "Model batch response's 'days' must be a non-empty list.",
+            category=CATEGORY_SCHEMA_MISMATCH, detail="days missing or empty",
+        )
     for day in batch["days"]:
         day_missing = [k for k in ("day", "day_summary", "meals") if k not in day]
         if day_missing:
-            raise LLMProviderError(f"Model batch response day is missing fields: {day_missing}")
+            raise LLMProviderError(
+                f"Model batch response day is missing fields: {day_missing}",
+                category=CATEGORY_SCHEMA_MISMATCH, detail=f"day missing={day_missing}",
+            )
 
 
 def _dish_names_used(days):
@@ -744,7 +940,9 @@ def _generate_openrouter_batch(profile, agent_context, day_start, day_end, max_t
         batch = json.loads(text)
     except json.JSONDecodeError as exc:
         raise LLMProviderError(
-            f"Could not parse the model's JSON for days {day_start}-{day_end}: {exc}"
+            f"Could not parse the model's JSON for days {day_start}-{day_end}: {exc}",
+            provider="openrouter", category=CATEGORY_INVALID_JSON,
+            detail=f"days {day_start}-{day_end}; {exc}; response_chars={len(text)}; tail={text[-120:]!r}",
         ) from exc
 
     _validate_batch_shape(batch)
@@ -835,14 +1033,16 @@ def call_groq(messages, response_format=None, max_tokens=None):
     """
     if not GROQ_API_KEY:
         raise LLMProviderError(
-            "No API key configured. Set GROQ_API_KEY to use the Groq provider."
+            "No API key configured. Set GROQ_API_KEY to use the Groq provider.",
+            provider="groq", category=CATEGORY_MISSING_API_KEY,
         )
 
     try:
         import httpx
     except ImportError as exc:
         raise LLMProviderError(
-            "The 'httpx' package is not installed. Run: python3 -m pip install httpx"
+            "The 'httpx' package is not installed. Run: python3 -m pip install httpx",
+            provider="groq", category=CATEGORY_MISSING_DEPENDENCY,
         ) from exc
 
     payload = {
@@ -866,24 +1066,59 @@ def call_groq(messages, response_format=None, max_tokens=None):
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 429:
-            raise RateLimitError(f"Groq rate limit hit: {exc}") from exc
-        raise LLMProviderError(f"Groq request failed: {exc}") from exc
+        status = exc.response.status_code
+        if status == 429:
+            raise RateLimitError(
+                f"Groq rate limit hit: {exc}",
+                provider="groq", category=CATEGORY_RATE_LIMIT, status_code=status,
+                detail=_response_snippet(exc.response),
+            ) from exc
+        # 502/503/504 from the gateway, 400 for a bad payload, 401 for a bad
+        # key - all previously indistinguishable in the log line.
+        raise LLMProviderError(
+            f"Groq request failed: {exc}",
+            provider="groq", category=CATEGORY_HTTP_STATUS, status_code=status,
+            detail=_response_snippet(exc.response),
+        ) from exc
+    except httpx.TimeoutException as exc:
+        # Split out from the generic network branch below: a timeout means
+        # we gave up waiting, which is a different problem from not being
+        # able to reach the host at all.
+        raise LLMProviderError(
+            f"Groq request failed: {exc}",
+            provider="groq", category=CATEGORY_TIMEOUT, detail=type(exc).__name__,
+        ) from exc
     except httpx.HTTPError as exc:
-        raise LLMProviderError(f"Groq request failed: {exc}") from exc
+        raise LLMProviderError(
+            f"Groq request failed: {exc}",
+            provider="groq", category=CATEGORY_NETWORK, detail=type(exc).__name__,
+        ) from exc
 
     data = response.json()
 
     if "error" in data:
-        raise LLMProviderError(f"Groq returned an error: {data['error']}")
+        raise LLMProviderError(
+            f"Groq returned an error: {data['error']}",
+            provider="groq", category=CATEGORY_API_ERROR, status_code=response.status_code,
+            detail=str(data["error"]),
+        )
 
     choices = data.get("choices") or []
     if not choices:
-        raise LLMProviderError("Groq returned no choices in its response.")
+        raise LLMProviderError(
+            "Groq returned no choices in its response.",
+            provider="groq", category=CATEGORY_EMPTY_RESPONSE,
+            status_code=response.status_code, detail="no choices in response",
+        )
 
     text = choices[0].get("message", {}).get("content")
     if not text:
-        raise LLMProviderError("Groq's response contained no text content.")
+        raise LLMProviderError(
+            "Groq's response contained no text content.",
+            provider="groq", category=CATEGORY_EMPTY_RESPONSE,
+            status_code=response.status_code,
+            detail=f"finish_reason={choices[0].get('finish_reason')!r}, empty content",
+        )
 
     return text
 
@@ -922,7 +1157,11 @@ def groq_provider(profile, agent_context=None):
     try:
         plan = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise LLMProviderError(f"Could not parse the model's JSON: {exc}") from exc
+        raise LLMProviderError(
+            f"Could not parse the model's JSON: {exc}",
+            provider="groq", category=CATEGORY_INVALID_JSON,
+            detail=f"{exc}; response_chars={len(text)}; tail={text[-120:]!r}",
+        ) from exc
 
     _validate_plan_shape(plan)
 

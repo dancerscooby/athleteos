@@ -30,7 +30,7 @@ from orchestrator import run_with_trace
 from memory_integration import DEFAULT_ATHLETE_ID, update_memory_from_profile
 from episodic_memory import record_episode, record_latest_plan_summary
 from chat import SessionOwnershipError, chat_reply
-from llm_provider import LLMProviderError, RateLimitError
+from llm_provider import LLMProviderError, RateLimitError, format_provider_error
 from tools.ingredients_tool import parse_ingredients
 
 logger = logging.getLogger("athleteos.api")
@@ -309,7 +309,10 @@ def create_meal_plan(request: MealPlanRequest):
         # branch below so the athlete gets an honest, specific reason. No
         # retry here on purpose - retrying an already-oversubscribed pool
         # would only add to the congestion.
-        logger.warning("meal-plan: OpenRouter rate limit hit for athlete_id=%r: %s", athlete_id, exc)
+        logger.warning(
+            "meal-plan: provider rate limit for athlete_id=%r | %s",
+            athlete_id, format_provider_error(exc),
+        )
         raise HTTPException(
             status_code=503,
             detail="AthleteOS is temporarily busy. Please try again in a moment.",
@@ -324,7 +327,16 @@ def create_meal_plan(request: MealPlanRequest):
         # is never sent to the athlete, exactly as /chat already does, since
         # it can carry internal identifiers (env var names, provider error
         # payloads).
-        logger.error("meal-plan: LLM provider failed for athlete_id=%r: %s", athlete_id, exc)
+        # format_provider_error() names the provider, the failure CATEGORY
+        # and the HTTP status where there was one, so this branch no longer
+        # reads the same for an upstream 502, a read timeout and a body that
+        # would not parse. Everything in it is sanitised (see
+        # llm_provider.sanitize_for_log); the athlete still gets only the
+        # fixed 503 text below.
+        logger.error(
+            "meal-plan: provider failed for athlete_id=%r | %s",
+            athlete_id, format_provider_error(exc),
+        )
         raise HTTPException(
             status_code=503,
             detail="Meal plan generation isn't available right now. Please try again in a moment.",
@@ -517,7 +529,10 @@ def chat(request: ChatRequest):
         # the same catch-all message used for a missing key or a network
         # failure. No retry here on purpose - retrying against an already-
         # oversubscribed shared pool would only add to the congestion.
-        logger.warning("chat: OpenRouter rate limit hit for athlete_id=%r: %s", request.athlete_id, exc)
+        logger.warning(
+            "chat: provider rate limit for athlete_id=%r | %s",
+            request.athlete_id, format_provider_error(exc),
+        )
         raise HTTPException(
             status_code=503,
             detail="AthleteOS is temporarily busy. Please try again in a moment.",
@@ -529,7 +544,10 @@ def chat(request: ChatRequest):
         # internal identifiers (env var names, provider error payloads) that
         # have no business reaching a chat bubble. See chat.py's module
         # docstring for the audit finding this closes out.
-        logger.error("chat: LLM provider failed for athlete_id=%r: %s", request.athlete_id, exc)
+        logger.error(
+            "chat: provider failed for athlete_id=%r | %s",
+            request.athlete_id, format_provider_error(exc),
+        )
         raise HTTPException(
             status_code=503,
             detail="Ask AthleteOS isn't available right now. Please try again in a moment.",
