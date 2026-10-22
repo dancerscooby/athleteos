@@ -14,3 +14,9 @@ __pycache__/
 # Local editor/tooling state
 .claude/
 
+
+# fastembed model cache (filled by prefetch_models.py at build time)
+.fastembed_cache/
+
+# Local virtualenv
+.venv/

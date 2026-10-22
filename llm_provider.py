@@ -48,6 +48,7 @@ import json
 import logging
 import os
 import re
+import time
 
 from dotenv import load_dotenv
 
@@ -114,6 +115,13 @@ OPENROUTER_FALLBACK_MODEL = os.environ.get("OPENROUTER_FALLBACK_MODEL", "google/
 OPENROUTER_MAX_TOKENS = int(os.environ.get("ATHLETEOS_OPENROUTER_MAX_TOKENS", "3000"))
 OPENROUTER_EFFORT = os.environ.get("ATHLETEOS_OPENROUTER_EFFORT", "none")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+# Client-side read timeout per OpenRouter call. Was a hard-coded 60s, which
+# sat right on top of the measured ~45-60s a 4-day batch takes on a busy
+# free model - so any slow moment turned into a timeout. OpenRouter's own
+# free-tier gateway gives up at ~120s ("Upstream idle timeout exceeded"),
+# so 110s lets a slow-but-healthy call finish while still failing before
+# the gateway does.
+OPENROUTER_TIMEOUT = float(os.environ.get("ATHLETEOS_OPENROUTER_TIMEOUT", "110"))
 
 # Groq (groq_provider) - a third provider, evaluated as an alternative free
 # inference backend. Added ADDITIVELY: nothing above this block changes, and
@@ -148,6 +156,21 @@ GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 GROQ_MAX_TOKENS = int(os.environ.get("ATHLETEOS_GROQ_MAX_TOKENS", "3000"))
 GROQ_REASONING_EFFORT = os.environ.get("ATHLETEOS_GROQ_REASONING_EFFORT", "low")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_TIMEOUT = float(os.environ.get("ATHLETEOS_GROQ_TIMEOUT", "60"))
+# Groq's free tier caps TOKENS PER MINUTE (8,000 for gpt-oss-20b), and one
+# multi-day batch alone uses most of that. So for multi-day plans a 429 is
+# expected and deterministic - it means "wait until the minute rolls over",
+# not "the shared pool is congested" (the OpenRouter case, where we
+# deliberately never retry). Multi-day Groq calls therefore honour Groq's
+# Retry-After header, up to this many seconds per wait.
+GROQ_MAX_RATE_LIMIT_WAIT = float(os.environ.get("ATHLETEOS_GROQ_MAX_RATE_LIMIT_WAIT", "65"))
+
+# Multi-day batching (see the "Multi-day plans" section further down).
+# Max days per LLM call. OpenRouter's 4 is the largest batch measured to
+# finish well inside its gateway timeout. Groq's 2 keeps one batch (prompt +
+# ~3k output tokens) under its 8,000 tokens-per-minute cap.
+OPENROUTER_MULTI_DAY_BATCH_DAYS = int(os.environ.get("ATHLETEOS_OPENROUTER_MULTI_DAY_BATCH_DAYS", "4"))
+GROQ_MULTI_DAY_BATCH_DAYS = int(os.environ.get("ATHLETEOS_GROQ_MULTI_DAY_BATCH_DAYS", "2"))
 
 
 # Failure categories carried on LLMProviderError for server-side logging.
@@ -266,12 +289,16 @@ class LLMProviderError(Exception):
     ends up.
     """
 
-    def __init__(self, message, provider=None, category=None, status_code=None, detail=None):
+    def __init__(self, message, provider=None, category=None, status_code=None, detail=None,
+                 retry_after=None):
         super().__init__(message)
         self.provider = provider
         self.category = category
         self.status_code = status_code
         self.detail = sanitize_for_log(detail)
+        # Seconds the provider asked us to wait (HTTP Retry-After), when it
+        # said. Only multi-day Groq acts on it - see GROQ_MAX_RATE_LIMIT_WAIT.
+        self.retry_after = retry_after
 
     def log_context(self):
         """The diagnostic fields as a dict, for structured logging in api.py."""
@@ -692,7 +719,7 @@ def _call_openrouter_once(messages, response_format, model, max_tokens=None):
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=60.0,
+            timeout=OPENROUTER_TIMEOUT,
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
@@ -750,7 +777,7 @@ def _call_openrouter_once(messages, response_format, model, max_tokens=None):
     return text
 
 
-def call_openrouter(messages, response_format=None, max_tokens=None):
+def call_openrouter(messages, response_format=None, max_tokens=None, parse=None):
     """
     Low-level OpenRouter chat-completion call - the ONE place in the app
     that knows how to talk to OpenRouter's API. Every OpenRouter-based
@@ -776,6 +803,12 @@ def call_openrouter(messages, response_format=None, max_tokens=None):
     set to a different model, it is tried once, automatically. Callers
     (openrouter_provider(), chat.py) are unchanged - this is entirely
     internal to this one function.
+
+    `parse` (optional) turns the raw text into the caller's result and
+    raises LLMProviderError if it can't. It runs INSIDE the primary/fallback
+    attempt, so a 200 response whose JSON is truncated or malformed also
+    gets the fallback model - without it, only HTTP-level failures did, and
+    a single cut-off batch sank a whole 7-day plan.
     """
     if not OPENROUTER_API_KEY:
         raise LLMProviderError(
@@ -783,8 +816,12 @@ def call_openrouter(messages, response_format=None, max_tokens=None):
             provider="openrouter", category=CATEGORY_MISSING_API_KEY,
         )
 
+    def attempt(model):
+        text = _call_openrouter_once(messages, response_format, model, max_tokens=max_tokens)
+        return parse(text) if parse is not None else text
+
     try:
-        return _call_openrouter_once(messages, response_format, OPENROUTER_MODEL, max_tokens=max_tokens)
+        return attempt(OPENROUTER_MODEL)
     except LLMProviderError as primary_error:
         if not OPENROUTER_FALLBACK_MODEL or OPENROUTER_FALLBACK_MODEL == OPENROUTER_MODEL:
             raise
@@ -793,7 +830,7 @@ def call_openrouter(messages, response_format=None, max_tokens=None):
             "fallback model %r",
             OPENROUTER_MODEL, primary_error, OPENROUTER_FALLBACK_MODEL,
         )
-        return _call_openrouter_once(messages, response_format, OPENROUTER_FALLBACK_MODEL, max_tokens=max_tokens)
+        return attempt(OPENROUTER_FALLBACK_MODEL)
 
 
 def openrouter_provider(profile, agent_context=None):
@@ -851,25 +888,50 @@ def openrouter_provider(profile, agent_context=None):
 
 
 # ----------------------------------------------------------------------
-# OpenRouter multi-day provider (4+3 batching prototype)
+# Multi-day plans (batched; shared by OpenRouter and Groq)
 # ----------------------------------------------------------------------
-# A single OpenRouter call asking for a full 7-day plan was prototyped and
-# measured to be non-viable: OpenRouter's free-tier gateway enforces an
+# A single call asking for a full 7-day plan was prototyped and measured to
+# be non-viable on free models: OpenRouter's free-tier gateway enforces an
 # ~120s upstream idle timeout, and a complete 7-day response needs roughly
 # 7,000-9,000 completion tokens - long enough generation time to hit that
 # timeout regardless of max_tokens (confirmed empirically: both 8000 and
 # 10000-token attempts failed with "Upstream idle timeout exceeded", while
-# a 3000-token attempt simply truncated mid-response instead). Splitting
-# into two smaller batches (days 1-4, then days 5-7) was measured safe:
-# every batch size up to 4 days completed in under 60s, comfortably inside
-# the timeout, with clean JSON and no duplicate days.
+# a 3000-token attempt simply truncated mid-response instead). Groq has the
+# opposite constraint - fast, but capped at 8,000 tokens per minute - so a
+# full week can't go in one call there either.
 #
-# These are the measured completion-token counts for each batch size
-# (2=2762, 3=4354, 4=5466), each with headroom added for a safety margin -
-# NOT the same OPENROUTER_MAX_TOKENS used by the single-day path above,
-# which stays untouched.
-_MULTI_DAY_BATCH1_MAX_TOKENS = 6500  # days 1-4
-_MULTI_DAY_BATCH2_MAX_TOKENS = 5000  # days 5-7
+# So a multi-day plan is generated as a sequence of contiguous batches of
+# at most N days (OPENROUTER_/GROQ_MULTI_DAY_BATCH_DAYS), split as evenly as
+# possible - e.g. 7 days at N=4 is days 1-4 then 5-7, exactly the split the
+# original prototype measured. Batches run one after another, not in
+# parallel, on purpose: each later batch is told which dishes the earlier
+# ones already used (a best-effort variety nudge), and running them
+# concurrently would also multiply pressure on rate-limited free tiers.
+#
+# Per-batch max_tokens comes from the measured completion-token counts per
+# batch size (2=2762, 3=4354, 4=5466) plus headroom: 1500/day + 500, which
+# reproduces the prototype's tuned budgets exactly (4 days=6500, 3=5000).
+_MULTI_DAY_TOKENS_PER_DAY = 1500
+_MULTI_DAY_TOKENS_HEADROOM = 500
+
+
+def _multi_day_max_tokens(day_count):
+    return _MULTI_DAY_TOKENS_PER_DAY * day_count + _MULTI_DAY_TOKENS_HEADROOM
+
+
+def _batch_ranges(days, batch_days):
+    """Split days 1..`days` into contiguous (start, end) ranges of at most
+    `batch_days` days each, sized as evenly as possible with any larger
+    batches first (7 at 4 -> [(1, 4), (5, 7)]; 7 at 2 -> 2+2+2+1)."""
+    batch_days = max(1, batch_days)
+    count = -(-days // batch_days)  # ceiling division
+    base, extra = divmod(days, count)
+    ranges, start = [], 1
+    for i in range(count):
+        size = base + (1 if i < extra else 0)
+        ranges.append((start, start + size - 1))
+        start += size
+    return ranges
 
 
 def _validate_batch_shape(batch):
@@ -897,6 +959,38 @@ def _validate_batch_shape(batch):
             )
 
 
+def _batch_parser(provider, day_start, day_end):
+    """Return a function that turns one batch call's raw text into a
+    validated batch dict, raising LLMProviderError if it can't. Also checks
+    the model returned exactly the days it was asked for and renumbers them
+    to day_start..day_end - models occasionally restart numbering at 1 in a
+    later batch, which would otherwise yield a week with two "Day 1"s."""
+    expected = day_end - day_start + 1
+
+    def parse(text):
+        try:
+            batch = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise LLMProviderError(
+                f"Could not parse the model's JSON for days {day_start}-{day_end}: {exc}",
+                provider=provider, category=CATEGORY_INVALID_JSON,
+                detail=f"days {day_start}-{day_end}; {exc}; response_chars={len(text)}; tail={text[-120:]!r}",
+            ) from exc
+        _validate_batch_shape(batch)
+        if len(batch["days"]) != expected:
+            raise LLMProviderError(
+                f"Model returned {len(batch['days'])} days for days {day_start}-{day_end} "
+                f"(expected {expected}).",
+                provider=provider, category=CATEGORY_SCHEMA_MISMATCH,
+                detail=f"days {day_start}-{day_end}; got {len(batch['days'])} days",
+            )
+        for offset, day in enumerate(batch["days"]):
+            day["day"] = day_start + offset
+        return batch
+
+    return parse
+
+
 def _dish_names_used(days):
     """Flat set of every ingredient "item" name across all meals in `days` -
     the compact list passed to the next batch's prompt to encourage (not
@@ -912,84 +1006,75 @@ def _dish_names_used(days):
     return names
 
 
-def _generate_openrouter_batch(profile, agent_context, day_start, day_end, max_tokens, avoid_dishes=None):
-    """One OpenRouter call for days `day_start`..`day_end`. Reuses the exact
-    same prompt-composition, call_openrouter() (with its existing primary/
-    fallback retry behaviour), JSON parsing, and error-handling pattern
-    openrouter_provider() already uses for a single day - only the prompt
-    text and the (batch-scoped) max_tokens differ."""
+def _batch_prompt(profile, agent_context, day_start, day_end, avoid_dishes):
+    """The same prompt composition the single-day providers use (RAG context,
+    tool results, personal recipes), around the batch-shaped base prompt."""
     base_prompt = build_multi_day_batch_prompt(profile, day_start, day_end, avoid_dishes=avoid_dishes)
     rag_context = (agent_context or {}).get("rag_context") or ""
     tool_results = (agent_context or {}).get("tool_results") or {}
     personal_recipes = (agent_context or {}).get("personal_recipes") or []
     recipes_context = _format_recipes(personal_recipes, profile) if personal_recipes else None
-    prompt = _compose_prompt(base_prompt, rag_context, tool_results, recipes_context)
+    return _compose_prompt(base_prompt, rag_context, tool_results, recipes_context)
 
-    logger.info(
-        "openrouter_provider_multi_day: days %d-%d, model=%s, prompt length=%d characters",
-        day_start, day_end, OPENROUTER_MODEL, len(prompt),
-    )
 
-    text = call_openrouter(
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-        max_tokens=max_tokens,
-    )
+def _generate_multi_day(profile, days, agent_context, batch_days, generate_batch):
+    """
+    Run the batches for a `days`-day plan in order and merge them into the
+    MultiDayMealPlanResponse shape. `generate_batch(prompt, day_start,
+    day_end, max_tokens)` is the provider-specific part: it makes the call(s)
+    and returns a validated batch dict.
 
-    try:
-        batch = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise LLMProviderError(
-            f"Could not parse the model's JSON for days {day_start}-{day_end}: {exc}",
-            provider="openrouter", category=CATEGORY_INVALID_JSON,
-            detail=f"days {day_start}-{day_end}; {exc}; response_chars={len(text)}; tail={text[-120:]!r}",
-        ) from exc
+    Any batch that still fails after the provider's own recovery raises
+    LLMProviderError for the whole plan rather than returning a partial week,
+    so callers get the same all-or-nothing contract as a single-day plan.
+    """
+    merged_days = []
+    first_batch = None
+    for day_start, day_end in _batch_ranges(days, batch_days):
+        avoid_dishes = _dish_names_used(merged_days) if merged_days else None
+        prompt = _batch_prompt(profile, agent_context, day_start, day_end, avoid_dishes)
+        batch = generate_batch(prompt, day_start, day_end, _multi_day_max_tokens(day_end - day_start + 1))
+        if first_batch is None:
+            first_batch = batch
+        merged_days.extend(batch["days"])
 
-    _validate_batch_shape(batch)
-    return batch
+    return {
+        "duration_days": days,
+        "confidence_score": first_batch["confidence_score"],
+        "confidence_reason": first_batch["confidence_reason"],
+        "days": merged_days,
+        "disclaimer": first_batch["disclaimer"],
+    }
 
 
 def openrouter_provider_multi_day(profile, days, agent_context=None):
     """
-    Multi-day OpenRouter plan via the 4+3 batching approach (see the module
-    comment above this section for why a single 7-day call isn't viable).
-
-    Currently only days=7 is implemented - the only split this batching
-    approach was actually measured against. Same fail-GRACEFULLY contract
-    as every other provider here: raises LLMProviderError on any failure in
-    either batch: rather than returning a partial (days 1-4 only) plan, so
-    the mock provider stays usable as a fallback (see the module docstring)
-    if either half fails.
+    Multi-day OpenRouter plan for any `days` >= 2, in batches of at most
+    OPENROUTER_MULTI_DAY_BATCH_DAYS days (see the section comment above for
+    why a single call isn't viable). Same fail-GRACEFULLY contract as every
+    other provider here: raises LLMProviderError if any batch fails, rather
+    than returning a partial plan.
 
     Reuses everything the single-day openrouter_provider() does - the same
-    call_openrouter() (with its existing primary/fallback retry), the same
-    "none" reasoning effort, the same JSON-object response format - only the
-    prompt (build_multi_day_batch_prompt() instead of build_prompt()) and
-    the per-batch max_tokens differ.
+    call_openrouter() with its primary/fallback retry, the same "none"
+    reasoning effort, the same JSON-object response format. One addition:
+    each batch's JSON is parsed inside call_openrouter(), so a batch whose
+    primary-model reply is truncated or malformed is retried on the fallback
+    model instead of failing the whole plan.
     """
-    if days != 7:
-        raise NotImplementedError(
-            f"OpenRouter multi-day plans currently only support days=7 (4+3 "
-            f"batching); got days={days}."
+    def generate_batch(prompt, day_start, day_end, max_tokens):
+        logger.info(
+            "openrouter_provider_multi_day: days %d-%d, model=%s, prompt length=%d characters",
+            day_start, day_end, OPENROUTER_MODEL, len(prompt),
+        )
+        return call_openrouter(
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            max_tokens=max_tokens,
+            parse=_batch_parser("openrouter", day_start, day_end),
         )
 
-    batch1 = _generate_openrouter_batch(
-        profile, agent_context, day_start=1, day_end=4,
-        max_tokens=_MULTI_DAY_BATCH1_MAX_TOKENS,
-    )
-    dishes_used = _dish_names_used(batch1["days"])
-    batch2 = _generate_openrouter_batch(
-        profile, agent_context, day_start=5, day_end=7,
-        max_tokens=_MULTI_DAY_BATCH2_MAX_TOKENS, avoid_dishes=dishes_used,
-    )
-
-    return {
-        "duration_days": days,
-        "confidence_score": batch1["confidence_score"],
-        "confidence_reason": batch1["confidence_reason"],
-        "days": batch1["days"] + batch2["days"],
-        "disclaimer": batch1["disclaimer"],
-    }
+    return _generate_multi_day(profile, days, agent_context, OPENROUTER_MULTI_DAY_BATCH_DAYS, generate_batch)
 
 
 # ----------------------------------------------------------------------
@@ -1017,6 +1102,15 @@ def _groq_response_format():
             "schema": MEAL_PLAN_SCHEMA,
         },
     }
+
+
+def _retry_after_seconds(response):
+    """The Retry-After header as seconds, or None if absent/unparseable."""
+    try:
+        value = float(response.headers.get("retry-after"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 def call_groq(messages, response_format=None, max_tokens=None):
@@ -1062,7 +1156,7 @@ def call_groq(messages, response_format=None, max_tokens=None):
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=60.0,
+            timeout=GROQ_TIMEOUT,
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
@@ -1072,6 +1166,7 @@ def call_groq(messages, response_format=None, max_tokens=None):
                 f"Groq rate limit hit: {exc}",
                 provider="groq", category=CATEGORY_RATE_LIMIT, status_code=status,
                 detail=_response_snippet(exc.response),
+                retry_after=_retry_after_seconds(exc.response),
             ) from exc
         # 502/503/504 from the gateway, 400 for a bad payload, 401 for a bad
         # key - all previously indistinguishable in the log line.
@@ -1166,3 +1261,79 @@ def groq_provider(profile, agent_context=None):
     _validate_plan_shape(plan)
 
     return plan
+
+
+def _groq_batch_response_format():
+    """Strict json_schema for one multi-day batch: the batch envelope
+    (confidence/days/disclaimer) around days whose day_summary and meals
+    reuse MEAL_PLAN_SCHEMA's own definitions, so the two can't drift."""
+    day_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "day": {"type": "integer"},
+            "day_summary": MEAL_PLAN_SCHEMA["properties"]["day_summary"],
+            "meals": MEAL_PLAN_SCHEMA["properties"]["meals"],
+        },
+        "required": ["day", "day_summary", "meals"],
+    }
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "meal_plan_batch",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "confidence_score": MEAL_PLAN_SCHEMA["properties"]["confidence_score"],
+                    "confidence_reason": MEAL_PLAN_SCHEMA["properties"]["confidence_reason"],
+                    "days": {"type": "array", "items": day_schema},
+                    "disclaimer": MEAL_PLAN_SCHEMA["properties"]["disclaimer"],
+                },
+                "required": ["confidence_score", "confidence_reason", "days", "disclaimer"],
+            },
+        },
+    }
+
+
+def _call_groq_waiting_on_rate_limit(messages, response_format, max_tokens):
+    """call_groq(), but on a 429 that carries a Retry-After of at most
+    GROQ_MAX_RATE_LIMIT_WAIT seconds, wait it out and try once more. Used
+    only between multi-day batches, where hitting the tokens-per-minute cap
+    is expected (see GROQ_MAX_RATE_LIMIT_WAIT)."""
+    try:
+        return call_groq(messages, response_format=response_format, max_tokens=max_tokens)
+    except RateLimitError as exc:
+        if exc.retry_after is None or exc.retry_after > GROQ_MAX_RATE_LIMIT_WAIT:
+            raise
+        logger.warning("Groq rate limit (tokens/minute) - waiting %.1fs before retrying", exc.retry_after)
+        time.sleep(exc.retry_after)
+        return call_groq(messages, response_format=response_format, max_tokens=max_tokens)
+
+
+def groq_provider_multi_day(profile, days, agent_context=None):
+    """
+    Multi-day Groq plan for any `days` >= 2, in batches of at most
+    GROQ_MULTI_DAY_BATCH_DAYS days - the Groq counterpart of
+    openrouter_provider_multi_day(), sharing its batching and merging.
+
+    Differences from the OpenRouter version: each batch uses a strict
+    json_schema (as groq_provider() does), and a tokens-per-minute 429
+    between batches is waited out via Retry-After instead of failing the
+    plan. That makes a 7-day Groq plan slower (it is paced by the per-minute
+    cap) but reliable. Raises LLMProviderError if any batch still fails.
+    """
+    response_format = _groq_batch_response_format()
+
+    def generate_batch(prompt, day_start, day_end, max_tokens):
+        logger.info(
+            "groq_provider_multi_day: days %d-%d, model=%s, prompt length=%d characters",
+            day_start, day_end, GROQ_MODEL, len(prompt),
+        )
+        text = _call_groq_waiting_on_rate_limit(
+            [{"role": "user", "content": prompt}], response_format, max_tokens,
+        )
+        return _batch_parser("groq", day_start, day_end)(text)
+
+    return _generate_multi_day(profile, days, agent_context, GROQ_MULTI_DAY_BATCH_DAYS, generate_batch)

@@ -103,9 +103,27 @@ def _get_connection():
             )
         import psycopg
         logger.info("Connecting to Postgres backend...")
-        _conn = psycopg.connect(DATABASE_URL, autocommit=True)
+        # prepare_threshold=None: Supabase's transaction pooler (port 6543)
+        # can't keep server-side prepared statements across transactions,
+        # and psycopg auto-prepares a query after 5 runs - which then fails
+        # with "prepared statement ... does not exist". Harmless on a direct
+        # or session-pooler connection.
+        _conn = psycopg.connect(
+            DATABASE_URL, autocommit=True, prepare_threshold=None, connect_timeout=10,
+        )
         logger.info("Postgres connection established.")
     return _conn
+
+
+def _drop_connection():
+    """Close and forget the cached connection so the next call opens a fresh one."""
+    global _conn
+    if _conn is not None:
+        try:
+            _conn.close()
+        except Exception:
+            pass
+    _conn = None
 
 
 def _reset_connection_for_tests():
@@ -114,13 +132,25 @@ def _reset_connection_for_tests():
     call opens a fresh one - mirrors the reset pattern already used for
     retriever.py's lazily-cached _model/_index globals in tests.
     """
-    global _conn
-    if _conn is not None:
-        try:
-            _conn.close()
-        except Exception:
-            pass
-    _conn = None
+    _drop_connection()
+
+
+def _with_connection(operation):
+    """
+    Run `operation(conn)` on the shared connection; if the connection turns
+    out to be dead, reconnect and run it once more. Hosted Postgres (and
+    Supabase's pooler especially) closes idle connections, and Render's free
+    tier idles between visitors - so the first request after a quiet spell
+    used to fail on the stale connection instead of just reconnecting.
+    """
+    import psycopg
+
+    try:
+        return operation(_get_connection())
+    except psycopg.OperationalError as exc:
+        logger.warning("Postgres connection lost (%s) - reconnecting and retrying once", exc)
+        _drop_connection()
+        return operation(_get_connection())
 
 
 # ----------------------------------------------------------------------
@@ -134,10 +164,13 @@ def get(category, athlete_id):
     memory_manager.py's dispatch before this is ever called.
     """
     table = _UPDATE_IN_PLACE_TABLES[category]
-    conn = _get_connection()
-    with conn.cursor() as cur:
-        cur.execute(f"SELECT data FROM {table} WHERE athlete_id = %s", (athlete_id,))
-        row = cur.fetchone()
+
+    def select(conn):
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT data FROM {table} WHERE athlete_id = %s", (athlete_id,))
+            return cur.fetchone()
+
+    row = _with_connection(select)
     value = row[0] if row else None
     logger.info(
         "get(category=%r, athlete_id=%r) -> %s",
@@ -155,17 +188,20 @@ def set(category, athlete_id, value):
     from psycopg.types.json import Jsonb
 
     table = _UPDATE_IN_PLACE_TABLES[category]
-    conn = _get_connection()
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""
-            INSERT INTO {table} (athlete_id, data, updated_at)
-            VALUES (%s, %s, now())
-            ON CONFLICT (athlete_id) DO UPDATE
-                SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at
-            """,
-            (athlete_id, Jsonb(value)),
-        )
+
+    def upsert(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {table} (athlete_id, data, updated_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (athlete_id) DO UPDATE
+                    SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at
+                """,
+                (athlete_id, Jsonb(value)),
+            )
+
+    _with_connection(upsert)
     logger.info("set(category=%r, athlete_id=%r) -> stored", category, athlete_id)
 
 
@@ -190,27 +226,29 @@ def append(category, athlete_id, entry):
     stamped_entry = {k: v for k, v in dict(entry).items() if k != "_stored_at"}
     stored_at = time.time()
 
-    conn = _get_connection()
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO episodes (athlete_id, stored_at, data) VALUES (%s, %s, %s)",
-            (athlete_id, stored_at, Jsonb(stamped_entry)),
-        )
-
-        cutoff = time.time() - (EPISODIC_MAX_AGE_DAYS * 86400)
-        cur.execute(
-            "DELETE FROM episodes WHERE athlete_id = %s AND stored_at < %s",
-            (athlete_id, cutoff),
-        )
-        cur.execute(
-            """
-            DELETE FROM episodes WHERE id IN (
-                SELECT id FROM episodes WHERE athlete_id = %s
-                ORDER BY stored_at DESC OFFSET %s
+    def insert_and_prune(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO episodes (athlete_id, stored_at, data) VALUES (%s, %s, %s)",
+                (athlete_id, stored_at, Jsonb(stamped_entry)),
             )
-            """,
-            (athlete_id, EPISODIC_MAX_ENTRIES),
-        )
+
+            cutoff = time.time() - (EPISODIC_MAX_AGE_DAYS * 86400)
+            cur.execute(
+                "DELETE FROM episodes WHERE athlete_id = %s AND stored_at < %s",
+                (athlete_id, cutoff),
+            )
+            cur.execute(
+                """
+                DELETE FROM episodes WHERE id IN (
+                    SELECT id FROM episodes WHERE athlete_id = %s
+                    ORDER BY stored_at DESC OFFSET %s
+                )
+                """,
+                (athlete_id, EPISODIC_MAX_ENTRIES),
+            )
+
+    _with_connection(insert_and_prune)
     logger.info("append(category=%r, athlete_id=%r) -> stored", category, athlete_id)
 
 
@@ -225,16 +263,18 @@ def list(category, athlete_id, limit=None):
     column, so callers see the exact same shape the JSON backend returns
     (memory_manager's tests check for this field explicitly).
     """
-    conn = _get_connection()
     query = "SELECT stored_at, data FROM episodes WHERE athlete_id = %s ORDER BY stored_at DESC"
     params = [athlete_id]
     if limit is not None:
         query += " LIMIT %s"
         params.append(limit)
 
-    with conn.cursor() as cur:
-        cur.execute(query, params)
-        rows = cur.fetchall()
+    def select(conn):
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            return cur.fetchall()
+
+    rows = _with_connection(select)
 
     result = []
     for stored_at, data in rows:

@@ -302,12 +302,13 @@ class TestProviderSwitching(unittest.TestCase):
             meal_planner.generate_meal_plan(dict(BASE_PROFILE), agent_context=agent_context)
         self.assertEqual(provider.call_args.args[1], agent_context)
 
-    def test_multi_day_is_deliberately_not_implemented_for_groq(self):
-        """Multi-day was explicitly out of scope for this evaluation, so it
-        must fail loudly rather than silently ignoring `days`."""
-        with mock.patch.object(meal_planner, "PROVIDER", "groq"):
-            with self.assertRaises(NotImplementedError):
-                meal_planner.generate_meal_plan(dict(BASE_PROFILE), days=7)
+    def test_multi_day_dispatches_to_groq_multi_day_provider(self):
+        """days > 1 on Groq goes to the batched groq_provider_multi_day()
+        (it used to raise NotImplementedError, which reached the athlete
+        as a bare 500)."""
+        with mock.patch.object(meal_planner, "PROVIDER", "groq"),              mock.patch("llm_provider.groq_provider_multi_day", return_value={"fake": "plan"}) as provider:
+            meal_planner.generate_meal_plan(dict(BASE_PROFILE), days=7)
+        provider.assert_called_once_with(dict(BASE_PROFILE), 7, None)
 
     def test_default_provider_is_still_not_groq(self):
         """Adding this provider must not change what runs by default."""

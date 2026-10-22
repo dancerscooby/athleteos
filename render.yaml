@@ -1,0 +1,35 @@
+# AthleteOS - Render Blueprint (https://render.com/docs/blueprint-spec).
+# In Render: New + -> Blueprint -> pick this repo. Render then asks for the
+# values marked `sync: false` (secrets) - they are never stored in this file.
+# See DEPLOY.md for the full walkthrough.
+services:
+  - type: web
+    name: athleteos
+    runtime: python
+    plan: free
+    # Install deps, then bake the RAG models into the build (prefetch_models.py)
+    # so cold starts don't re-download them inside the first request.
+    buildCommand: pip install -r requirements.txt && python prefetch_models.py
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.14
+      # Inside the project dir, so models downloaded during the build ship
+      # with the deploy (Render's project dir is /opt/render/project/src).
+      - key: FASTEMBED_CACHE_PATH
+        value: /opt/render/project/src/.fastembed_cache
+      - key: ATHLETEOS_PROVIDER
+        value: openrouter
+      - key: ATHLETEOS_STORAGE_BACKEND
+        value: postgres
+      - key: OPENROUTER_API_KEY
+        sync: false
+      # Supabase: use the SESSION POOLER connection string (Project ->
+      # Connect -> "Session pooler"). The "Direct connection" host is
+      # IPv6-only, and Render cannot reach IPv6 addresses.
+      - key: DATABASE_URL
+        sync: false
+      # Only needed if you switch ATHLETEOS_PROVIDER to groq.
+      - key: GROQ_API_KEY
+        sync: false

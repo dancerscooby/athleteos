@@ -1880,11 +1880,11 @@ def generate_meal_plan(profile, agent_context=None, days=1):
     disclaimer), for every provider. days > 1 is implemented for
     PROVIDER="mock" (see mock_provider_multi_day() - the deterministic
     provider the multi-day variety requirement was originally built against)
-    and, as of the 4+3 batching prototype, for PROVIDER="openrouter" too
-    (see llm_provider.openrouter_provider_multi_day() - currently only
-    days=7 specifically, the only value the batching approach was validated
-    against). Requesting an unimplemented days/provider combination raises
-    NotImplementedError rather than silently ignoring `days`.
+    and for PROVIDER="openrouter" / "groq" (see llm_provider's batched
+    openrouter_provider_multi_day() / groq_provider_multi_day(), which
+    handle any day count). PROVIDER="claude" has no multi-day path yet:
+    that combination raises NotImplementedError rather than silently
+    ignoring `days`.
 
     Every successfully generated plan passes through the deterministic
     post-processing steps before being returned - real recipe URLs, and
@@ -1934,9 +1934,12 @@ def _dispatch_provider(profile, agent_context, days):
         # Same lazy-import reasoning as the days==1 branch above.
         from llm_provider import openrouter_provider_multi_day
         return openrouter_provider_multi_day(profile, days, agent_context)
+    if PROVIDER == "groq":
+        from llm_provider import groq_provider_multi_day
+        return groq_provider_multi_day(profile, days, agent_context)
     raise NotImplementedError(
         f"Multi-day plans (days={days}) are only implemented for "
-        f"PROVIDER='mock' or 'openrouter' right now; got PROVIDER={PROVIDER!r}."
+        f"PROVIDER='mock', 'openrouter' or 'groq' right now; got PROVIDER={PROVIDER!r}."
     )
 
 

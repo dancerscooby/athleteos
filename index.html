@@ -982,8 +982,14 @@
 
     function setLoading(on) {
       btn.disabled = on;
+      // A multi-day plan is generated in several sequential batches and can
+      // take a couple of minutes on free models - say so, so a long wait
+      // doesn't look like a hang.
+      const multiDay = Number(form.elements.duration_days.value) > 1;
       btn.innerHTML = on
-        ? '<span class="spinner"></span>Generating your meal plan...'
+        ? `<span class="spinner"></span>${multiDay
+            ? "Generating your multi-day plan (this can take 1-3 minutes)..."
+            : "Generating your meal plan..."}`
         : "Generate meal plan";
     }
 

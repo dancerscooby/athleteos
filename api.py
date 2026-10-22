@@ -5,7 +5,7 @@ This is the WEB entry point for AthleteOS. It is deliberately separate from the
 CLI developer tool in meal_planner.py: the CLI is still run with
 `python3 meal_planner.py`, while the web server is run with uvicorn (see below).
 
-This app currently exposes a health-check route at "/", and (Step 2.2) defines
+This app exposes the frontend at "/", a health-check route at "/health", and (Step 2.2) defines
 the request model that the future meal-plan endpoint will accept. The POST
 endpoint itself and the call to generate_meal_plan() are intentionally NOT here
 yet; they come in a later step.
@@ -59,18 +59,23 @@ ATHLETE_ID_PATTERN = (
 )
 
 
-@app.get("/")
-def read_root():
-    """Health check: lets us verify the server is up and responding."""
+@app.get("/health")
+def health():
+    """Health check: lets us (and Render's healthCheckPath) verify the server is up."""
     return {"status": "ok", "service": "AthleteOS API"}
 
 
+@app.get("/")
 @app.get("/app")
 def serve_frontend():
     """
     Serve the single-page frontend (index.html) from the SAME origin as the
     API, so the browser's fetch() call to /meal-plan needs no CORS setup.
     This only serves a static file - it adds no business logic.
+
+    Served at "/" so the deployed URL opens the app itself; "/" used to be
+    the JSON health check, which made a working deploy look broken.
+    "/app" is kept so existing links keep working.
     """
     return FileResponse(Path(__file__).parent / "index.html")
 
@@ -340,6 +345,19 @@ def create_meal_plan(request: MealPlanRequest):
         raise HTTPException(
             status_code=503,
             detail="Meal plan generation isn't available right now. Please try again in a moment.",
+        ) from exc
+    except NotImplementedError as exc:
+        # The configured provider has no path for this duration (today:
+        # multi-day on PROVIDER="claude"). Previously this escaped as a bare
+        # plain-text 500; it is a configuration limit, not a crash, so the
+        # athlete gets a clear JSON message they can act on (pick 1 day).
+        logger.error("meal-plan: unsupported request for athlete_id=%r | %s", athlete_id, exc)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{duration_days}-day plans aren't available with the current setup. "
+                "Please choose a 1-day plan."
+            ),
         ) from exc
     update_memory_from_profile(trace["merged_profile"], athlete_id)  # remember this athlete's latest info
     # Episodic memory's schema (episodic_memory.create_episode) reads a

@@ -13,14 +13,14 @@ Covers:
     3. Happy path: two batches merge into duration_days=7, 7 days total,
        confidence/disclaimer taken from batch 1, batch 2's prompt receives
        batch 1's dish names as an avoid-list.
-    4. A malformed/failed batch 1 raises LLMProviderError and batch 2 is
-       never called.
+    4. A malformed/failed batch 1 (on both primary and fallback model)
+       raises LLMProviderError and batch 2 is never called.
     5. A malformed/failed batch 2 raises LLMProviderError even though
        batch 1 succeeded (no partial-week result).
-    6. days != 7 raises NotImplementedError without making any HTTP call.
-    7. generate_meal_plan()'s PROVIDER="openrouter" dispatch for days=7
-       calls openrouter_provider_multi_day(); for an unsupported days count
-       it raises NotImplementedError.
+    6. Day counts other than 7 are batched too (see
+       test_multi_day_batching.py for the batching rules themselves).
+    7. generate_meal_plan()'s PROVIDER="openrouter" dispatch for any
+       days > 1 calls openrouter_provider_multi_day().
     8. The existing single-day openrouter_provider() path is unaffected
        (verified by the full existing test_openrouter_provider.py suite
        still passing unchanged, not re-tested here).
@@ -185,7 +185,8 @@ class TestOpenrouterProviderMultiDay(unittest.TestCase):
             with self.assertRaises(LLMProviderError):
                 openrouter_provider_multi_day(BASE_PROFILE, 7)
 
-        self.assertEqual(post.call_count, 1)
+        # Primary model, then the fallback model - both for batch 1 only.
+        self.assertEqual(post.call_count, 2)
 
     def test_batch_two_failure_raises_even_though_batch_one_succeeded(self):
         batch1 = _batch(1, 4, "batch1dish")
@@ -193,17 +194,23 @@ class TestOpenrouterProviderMultiDay(unittest.TestCase):
             post.side_effect = [
                 _fake_httpx_response(json_body=_chat_completion(json.dumps(batch1))),
                 _fake_httpx_response(json_body=_chat_completion("not valid json")),
+                _fake_httpx_response(json_body=_chat_completion("not valid json")),
             ]
             with self.assertRaises(LLMProviderError):
                 openrouter_provider_multi_day(BASE_PROFILE, 7)
 
-        self.assertEqual(post.call_count, 2)
+        # Batch 1, then batch 2 on the primary and fallback models.
+        self.assertEqual(post.call_count, 3)
 
-    def test_unsupported_days_raises_without_any_http_call(self):
+    def test_three_days_fit_in_a_single_batch(self):
         with _patched_api_key(), mock.patch("httpx.post") as post:
-            with self.assertRaises(NotImplementedError):
-                openrouter_provider_multi_day(BASE_PROFILE, 3)
-        post.assert_not_called()
+            post.return_value = _fake_httpx_response(
+                json_body=_chat_completion(json.dumps(_batch(1, 3, "dish")))
+            )
+            plan = openrouter_provider_multi_day(BASE_PROFILE, 3)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual([d["day"] for d in plan["days"]], [1, 2, 3])
+        self.assertEqual(plan["duration_days"], 3)
 
     def test_batches_use_larger_max_tokens_than_the_single_day_default(self):
         batch1 = _batch(1, 4, "batch1dish")
@@ -234,10 +241,10 @@ class TestGenerateMealPlanMultiDayDispatch(unittest.TestCase):
         provider_mock.assert_called_once_with(dict(BASE_PROFILE), 7, None)
         self.assertEqual(plan, {"fake": "plan"})
 
-    def test_openrouter_unsupported_day_count_raises_not_implemented(self):
-        with mock.patch.object(meal_planner, "PROVIDER", "openrouter"):
-            with self.assertRaises(NotImplementedError):
-                generate_meal_plan(dict(BASE_PROFILE), agent_context=None, days=3)
+    def test_openrouter_other_day_counts_dispatch_to_multi_day_provider(self):
+        with mock.patch.object(meal_planner, "PROVIDER", "openrouter"),              mock.patch("llm_provider.openrouter_provider_multi_day", return_value={"fake": "plan"}) as provider_mock:
+            generate_meal_plan(dict(BASE_PROFILE), agent_context=None, days=3)
+        provider_mock.assert_called_once_with(dict(BASE_PROFILE), 3, None)
 
     def test_mock_seven_day_still_uses_mock_multi_day_unchanged(self):
         # Guards against the new openrouter branch accidentally shadowing
